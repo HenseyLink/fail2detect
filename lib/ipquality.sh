@@ -167,7 +167,7 @@ gc_parse() {   # dir ip
             G[proxycheck.tor]=\(.type == "TOR")
             G[proxycheck.server]=\((.type // "") | test("Hosting|VPN"))"' <<<"$j")"
     fi
-    j=$(cat "$d/scamalytics" 2>/dev/null | tr '\n' ' ')
+    j=""; [[ -f "$d/scamalytics" ]] && j=$(tr '\n' ' ' < "$d/scamalytics")
     if [[ "$j" =~ \"score\":\"([0-9]+)\" ]]; then
         G[scamalytics.risk]="${BASH_REMATCH[1]}"
         local row name key
