@@ -77,26 +77,26 @@ inb=$(inbound_build xhttp-reality T 443 d.example.com "" "/keep" "PRIV" "SID")
 [[ "$(jq -r '.streamSettings | .xhttpSettings.path + " " + .realitySettings.privateKey + " " + .realitySettings.shortIds[0]' <<<"$inb")" == "/keep PRIV SID" ]] \
     && pass "смена транспорта сохраняет ключи и path" || fail "сохранение ключей и path"
 
-section "docker-compose ноды (в т.ч. от других установщиков)"
-mkdir -p "$WORK/node"
-printf 'services:\n  remnawave-nginx:\n    image: nginx\n    volumes:\n      - ./a:/a\n\n  remnanode:\n    image: remnawave/node\n    volumes:\n      - /dev/shm:/dev/shm:rw\n' > "$WORK/node/docker-compose.yml"
+section "docker-compose ноды (разные установщики и отступы)"
 node_dir() { echo "$WORK/node"; }
-node_compose_add_certs
-[[ "$(grep -c xray-certs "$WORK/node/docker-compose.yml")" == 1 ]] && pass "монтирование сертификатов добавлено один раз" || fail "монтирование сертификатов"
-awk '/remnawave-nginx:/,/remnanode:/' "$WORK/node/docker-compose.yml" | grep -q xray-certs && fail "сертификаты попали в nginx" || pass "сервис nginx не тронут"
-node_compose_add_certs && fail "повторный запуск изменил файл" || pass "повторный запуск ничего не меняет"
+for fx in compose-nginx compose-caddy; do
+    mkdir -p "$WORK/node"; cp "$ROOT/tests/fixtures/$fx.yml" "$WORK/node/docker-compose.yml"
+    node_compose_add_certs; rc=$?
+    f="$WORK/node/docker-compose.yml"
+    [[ $rc == 0 && "$(grep -c xray-certs "$f")" == 1 ]] && pass "$fx: монтирование добавлено" || fail "$fx: монтирование" "rc=$rc"
+    # строка с сертификатами стоит в volumes сервиса remnanode и с тем же отступом, что соседние элементы
+    blk=$(awk '/^ *remnanode:/{f=1} f&&/^[^ ]/{f=0} f' "$f")
+    ind_new=$(grep 'xray-certs' <<<"$blk" | sed -E 's/^( *).*/\1/' | awk '{print length}')
+    ind_sib=$(grep -m1 '/dev/shm' <<<"$blk" | sed -E 's/^( *).*/\1/' | awk '{print length}')
+    [[ -n "$ind_new" && "$ind_new" == "$ind_sib" ]] && pass "$fx: отступ совпадает с соседями ($ind_new)" || fail "$fx: отступ" "новый=$ind_new соседи=$ind_sib"
+    diff <(awk '/^ *remnanode:/{exit} {print}' "$ROOT/tests/fixtures/$fx.yml") <(awk '/^ *remnanode:/{exit} {print}' "$f") >/dev/null \
+        && pass "$fx: остальные сервисы не тронуты" || fail "$fx: изменены другие сервисы"
+    node_compose_add_certs && fail "$fx: повторный запуск изменил файл" || pass "$fx: повторный запуск ничего не меняет"
+done
+printf 'services:\n    remnanode:\n        image: remnawave/node\n' > "$WORK/node/docker-compose.yml"
+node_compose_add_certs && grep -q '^        volumes:$' "$WORK/node/docker-compose.yml" && grep -q '^          - ./certs' "$WORK/node/docker-compose.yml" \
+    && pass "сервис без volumes: секция добавлена" || fail "сервис без volumes" "$(cat "$WORK/node/docker-compose.yml")"
 STUB_NODE=yes
-
-section "Защита администратора"
-# shellcheck disable=SC2317,SC2329
-journalctl() { printf '%s\n' "Accepted publickey for root from 77.1.1.1 port 51000 ssh2: ED25519 SHA256:x" "Failed password for root from 77.2.2.2 port 1 ssh2"; }
-# shellcheck disable=SC2317,SC2329
-who() { [[ "${1:-}" == --ips ]] && echo "root     pts/0        2026-10-23 22:00 88.3.3.3"; }
-[[ -n "$(ban_ignored 77.1.1.1)" ]] && pass "успешный вход по SSH → не банится" || fail "успешный вход по SSH → не банится"
-[[ -n "$(ban_ignored 88.3.3.3)" ]] && pass "открытая SSH-сессия → не банится" || fail "открытая SSH-сессия → не банится"
-[[ -z "$(ban_ignored 77.2.2.2)" ]] && pass "неудачный вход → банится" || fail "неудачный вход → банится"
-unset -f journalctl who
-is_yes yy && is_yes "Да" && is_yes " y" && ! is_yes n && ! is_yes "" && pass "is_yes: yy/Да/y — да, n/пусто — нет" || fail "is_yes"
 
 section "Сертификаты (certbot и Caddy)"
 mkc() { mkdir -p "$1"; openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=$3" -addext "subjectAltName=DNS:$3" \

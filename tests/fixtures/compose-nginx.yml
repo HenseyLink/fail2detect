@@ -1,0 +1,12 @@
+services:
+  remnawave-nginx:
+    image: nginx
+    volumes:
+      - ./a:/a
+
+  remnanode:
+    image: remnawave/node
+    network_mode: host
+    volumes:
+      - /dev/shm:/dev/shm:rw
+      - /var/log/remnanode:/var/log/remnanode

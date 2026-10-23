@@ -175,14 +175,39 @@ node_compose_add_certs() {
     [[ -f "$f" ]] || return 1
     grep -q "$XRAY_CERT_DIR" "$f" && return 1
     cp -a "$f" "$f.f2d.bak"
-    awk -v line="      - ./certs:${XRAY_CERT_DIR}:ro" '
-        function flush() { if (insvc && !done) { print "    volumes:"; print line; done=1 } }
-        /^  remnanode:[[:space:]]*$/ { insvc=1; print; next }
-        insvc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); insvc=0 }
-        insvc && /^    volumes:[[:space:]]*$/ { print; print line; done=1; next }
+    # Отступы берём из самого файла: у разных установщиков сервисы сдвинуты
+    # на 2 или 4 пробела, ключи и списки — на свою глубину.
+    awk -v mnt="./certs:${XRAY_CERT_DIR}:ro" '
+        function ind(s) { match(s, /^ */); return RLENGTH }
+        function sp(n,   r) { r=""; while (n-- > 0) r = r " "; return r }
+        function flush() {
+            if (insvc && !done) { k = kind ? kind : sind + 2
+                print sp(k) "volumes:"; print sp(k + 2) "- " mnt; done = 1 }
+        }
+        # ждём первую строку после «volumes:» — по ней узнаём отступ элементов списка
+        invol {
+            if ($0 ~ /^ *- /) { print sp(ind($0)) "- " mnt }
+            else { print sp(kind + 2) "- " mnt }
+            invol = 0; done = 1
+        }
+        /^ *remnanode:[ \t]*$/ && !insvc && !done { insvc = 1; sind = ind($0); print; next }
+        insvc && NF {
+            if (ind($0) <= sind) { flush(); insvc = 0 }
+            else if (!kind) kind = ind($0)
+        }
+        insvc && !done && kind && ind($0) == kind && $0 ~ /^ *volumes:[ \t]*$/ { print; invol = 1; next }
         { print }
-        END { flush() }
+        END { if (invol) print sp(kind + 2) "- " mnt; flush() }
     ' "$f.f2d.bak" > "$f"
+    grep -q "$XRAY_CERT_DIR" "$f" || { cp -a "$f.f2d.bak" "$f"; err "Не удалось добавить монтирование сертификатов в $f"; return 2; }
+    return 0
+}
+
+# Видит ли контейнер ноды сертификат? Проверяем ДО изменения панели: иначе
+# Xray получит конфиг с TLS, не найдёт файл и нода ляжет.
+node_certs_visible() {
+    docker exec remnanode test -s "$XRAY_CERT_DIR/fullchain.pem" 2>/dev/null \
+        && docker exec remnanode test -s "$XRAY_CERT_DIR/privkey.pem" 2>/dev/null
 }
 
 # node_prepare transport port domain [target] [old_port/proto]
@@ -203,11 +228,17 @@ node_prepare() {
     if transport_tls "$t"; then
         [[ -n "$domain" ]] || die "Для $t нужен домен ноды"
         cert_ensure "$domain" || die "Не удалось получить сертификат для $domain"
-        cert_install_for_node "$domain"
+        cert_install_for_node "$domain" || die "Не удалось скопировать сертификат $domain в $d/certs"
         config_set NODE_TLS_DOMAIN "$domain"
-        if node_compose_add_certs; then
-            (cd "$d" && docker compose up -d remnanode >/dev/null 2>&1) && ok "Нода пересоздана с сертификатами в $XRAY_CERT_DIR"
+        local rc=0; node_compose_add_certs || rc=$?
+        (( rc == 2 )) && die "Добавьте в $d/docker-compose.yml в volumes сервиса remnanode: - ./certs:$XRAY_CERT_DIR:ro"
+        if (( rc == 0 )) || ! node_certs_visible; then
+            info "Пересоздаю контейнер ноды, чтобы подключить $XRAY_CERT_DIR…"
+            (cd "$d" && docker compose up -d --force-recreate remnanode >/dev/null 2>&1) || die "docker compose не пересоздал remnanode"
+            local i; for i in $(seq 1 15); do node_certs_visible && break; sleep 1; done
         fi
+        node_certs_visible || die "Контейнер remnanode не видит $XRAY_CERT_DIR/fullchain.pem — панель НЕ изменена. Проверьте volumes в $d/docker-compose.yml"
+        ok "Нода видит сертификат $domain ($XRAY_CERT_DIR)"
     fi
 
     # selfsteal-сайт для Reality
