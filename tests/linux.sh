@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave installer setup; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave installer setup ipquality; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -115,6 +115,18 @@ mkdir -p "$WORK/node/certs"; node_dir() { echo "$WORK/node"; }; has_node() { tru
 NODE_TLS_DOMAIN=lv.example.com; cert_sync_node
 cmp -s "$CR/lv.example.com/lv.example.com.crt" "$WORK/node/certs/fullchain.pem" && pass "сертификат Caddy скопирован в ноду" || fail "копия в ноду"
 NODE_TLS_DOMAIN=""; unset F2D_CADDY_ROOTS; unset -f docker
+
+section "IPQuality: IP2Location и AbuseIPDB"
+mkdir -p "$WORK/ipq"; cp "$ROOT/tests/fixtures/ip2location-page.html" "$WORK/ipq/ip2loc"; cp "$ROOT/tests/fixtures/abuseipdb.json" "$WORK/ipq/abuseipdb"
+declare -A G=(); ABUSEIPDB_KEY="test"; gc_parse "$WORK/ipq" 78.135.77.114
+[[ "${G[ip2loc.asntype]}|${G[ip2loc.cc]}|${G[ip2loc.risk]}|${G[ip2loc.server]}" == "DCH|TR|3|true" ]] && pass "IP2Location: DCH, TR, fraud 3, сервер" || fail "IP2Location" "${G[ip2loc.asntype]}|${G[ip2loc.cc]}|${G[ip2loc.risk]}|${G[ip2loc.server]}"
+[[ "${G[abuseipdb.risk]}|${G[abuseipdb.cc]}|${G[abuseipdb.abuser]}|${G[abuseipdb.server]}|${G[abuseipdb.reports]}" == "37|TR|true|true|12" ]] \
+    && pass "AbuseIPDB: риск 37, TR, абьюзер, сервер, 12 жалоб" || fail "AbuseIPDB" "${G[abuseipdb.risk]}|${G[abuseipdb.cc]}|${G[abuseipdb.abuser]}|${G[abuseipdb.server]}|${G[abuseipdb.reports]}"
+read -r t _ <<<"$(usage_ru "${G[abuseipdb.asntype]}")"; [[ "$t" == Хостинг ]] && pass "тип AbuseIPDB → Хостинг" || fail "тип AbuseIPDB" "$t"
+read -r t _ <<<"$(usage_ru DCH)"; [[ "$t" == Хостинг ]] && pass "тип IP2Location DCH → Хостинг" || fail "DCH" "$t"
+read -r t _ <<<"$(usage_ru "ISP/MOB")"; [[ "$t" == Мобильный ]] && pass "тип IP2Location ISP/MOB → Мобильный" || fail "ISP/MOB" "$t"
+ABUSEIPDB_KEY=""; G=(); gc_parse "$WORK/ipq" 78.135.77.114; [[ "${G[abuseipdb.asntype]}" == nokey ]] && pass "без ключа AbuseIPDB — пометка «нужен ключ»" || fail "без ключа"
+unset G
 
 section "Адрес API панели"
 [[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \

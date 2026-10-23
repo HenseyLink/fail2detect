@@ -9,12 +9,13 @@
 # регуляторы отличают VPN-сервер от обычного абонента.
 
 UA_BROWSER='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
-GC_DBS=(ipinfo ipregistry ipapi proxycheck scamalytics ip2loc dbip)
+GC_DBS=(ipinfo ipregistry ipapi proxycheck scamalytics ip2loc abuseipdb dbip)
 # короткие имена для узких колонок таблицы
-declare -A GC_DB_SHORT=([ipinfo]=IPinfo [ipregistry]=ipregistry [ipapi]=ip-api [proxycheck]=proxycheck [scamalytics]=Scamalyt. [ip2loc]=IP2Loc [dbip]=DB-IP)
-declare -A GC_DB_TITLE=([ipinfo]=IPinfo [ipregistry]=ipregistry [ipapi]=ip-api [proxycheck]=proxycheck [scamalytics]=Scamalytics [ip2loc]=IP2Location [dbip]=DB-IP)
+declare -A GC_DB_SHORT=([ipinfo]=IPinfo [ipregistry]=ipregistry [ipapi]=ip-api [proxycheck]=proxycheck [scamalytics]=Scamalyt. [ip2loc]=IP2Loc [abuseipdb]=AbuseIPDB [dbip]=DB-IP)
+declare -A GC_DB_TITLE=([ipinfo]=IPinfo [ipregistry]=ipregistry [ipapi]=ip-api [proxycheck]=proxycheck [scamalytics]=Scamalytics [ip2loc]=IP2Location [abuseipdb]=AbuseIPDB [dbip]=DB-IP)
 
 _gc() { curl -4 -sS --max-time 12 -A "$UA_BROWSER" "$@" 2>/dev/null; }
+_gcv() { local v="$1"; shift; curl "-$v" -sS --max-time 12 -A "$UA_BROWSER" "$@" 2>/dev/null; }   # через IPv4 или IPv6
 
 # ---------- плашки ----------
 if [[ -n "$C_RESET" ]]; then
@@ -49,10 +50,21 @@ yn_badge() {
 # заголовок колонки: обрезать до ширины-1, чтобы колонки не слипались
 colhead() { local t="$1" w="$2"; printf '%s%s%s' "$C_CYAN" "$(pad "${t:0:$((w - 1))}" "$w")" "$C_RESET"; }
 label() { printf '%s%s%s' "$C_CYAN" "$(pad "$1" "${2:-22}")" "$C_RESET"; }
-section() { printf '%s%s%s\n' "$C_BOLD$C_WHITE" "$1" "$C_RESET"; }
+gc_section() { printf '%s%s%s\n' "$C_BOLD$C_WHITE" "$1" "$C_RESET"; }
 
 usage_ru() {   # тип сети -> "текст вид"
+    # коды IP2Location: ISP MOB DCH COM ORG GOV MIL EDU LIB CDN SES RSV (бывают составные: ISP/MOB)
+    case "${1^^}" in
+        DCH) set -- hosting;; MOB|ISP/MOB) set -- mobile;; ISP|FIXED\ LINE\ ISP) set -- isp;; COM|COMMERCIAL) set -- business;;
+        EDU|UNIVERSITY/COLLEGE/SCHOOL) set -- education;; GOV|GOVERNMENT|MIL|MILITARY) set -- government;;
+        CDN|"CONTENT DELIVERY NETWORK") set -- cdn;; SES|"SEARCH ENGINE SPIDER") set -- robot;; "MOBILE ISP") set -- mobile;;
+        "DATA CENTER/WEB HOSTING/TRANSIT") set -- hosting;; ORG|ORGANIZATION|LIB|LIBRARY) set -- organization;; RSV|RESERVED) set -- reserved;;
+    esac
     case "${1,,}" in
+        organization) echo "Организация ok";;
+        robot) echo "Поисковик warn";;
+        reserved) echo "Резерв warn";;
+        nokey) echo "нужен_ключ none";;
         isp|residential|"line isp") echo "Провайдер ok";;
         mobile|wireless|cellular) echo "Мобильный ok";;
         business) echo "Бизнес ok";;
@@ -91,7 +103,11 @@ gc_fetch_dbs() {   # dir ip
     ( _gc "http://ip-api.com/json/$ip?fields=status,countryCode,regionName,city,isp,as,mobile,proxy,hosting" > "$d/ipapi" ) &
     ( _gc "https://proxycheck.io/v2/$ip?vpn=1&asn=1&risk=1" > "$d/proxycheck" ) &
     ( _gc "https://scamalytics.com/ip/$ip" > "$d/scamalytics" ) &
-    ( _gc "https://api.ip2location.io/?ip=$ip" > "$d/ip2loc" ) &
+    ( _gc -L "https://www.ip2location.com/$ip" > "$d/ip2loc" ) &
+    if [[ -n "${ABUSEIPDB_KEY:-}" ]]; then
+        ( _gc -G "https://api.abuseipdb.com/api/v2/check" --data-urlencode "ipAddress=$ip" -d maxAgeInDays=90 \
+              -H "Key: $ABUSEIPDB_KEY" -H 'Accept: application/json' > "$d/abuseipdb" ) &
+    fi
     ( _gc "https://api.db-ip.com/v2/free/$ip" > "$d/dbip" ) &
 }
 
@@ -151,7 +167,7 @@ gc_parse() {   # dir ip
             G[proxycheck.tor]=\(.type == "TOR")
             G[proxycheck.server]=\((.type // "") | test("Hosting|VPN"))"' <<<"$j")"
     fi
-    j=$(tr '\n' ' ' < "$d/scamalytics" 2>/dev/null)
+    j=$(cat "$d/scamalytics" 2>/dev/null | tr '\n' ' ')
     if [[ "$j" =~ \"score\":\"([0-9]+)\" ]]; then
         G[scamalytics.risk]="${BASH_REMATCH[1]}"
         local row name key
@@ -165,9 +181,35 @@ gc_parse() {   # dir ip
         local rew='<th>Web Proxy</th>[[:space:]]*<td><div class="risk yes"'
         [[ "$j" =~ $rew ]] && G[scamalytics.proxy]=true
     fi
-    j=$(cat "$d/ip2loc" 2>/dev/null)
-    if jq -e .country_code >/dev/null 2>&1 <<<"$j"; then
-        G[ip2loc.cc]=$(jq -r .country_code <<<"$j"); G[ip2loc.proxy]=$(jq -r '.is_proxy | if . == null then "" else tostring end' <<<"$j")
+    # IP2Location: публичная страница (тип использования, тип прокси, fraud score)
+    j=$(sed 's/<[^>]*>/ /g; s/&nbsp;/ /g' "$d/ip2loc" 2>/dev/null | tr -s ' \t\n' ' ')
+    if [[ "$j" =~ Usage\ Type\ \(([A-Z/]+)\) ]]; then
+        G[ip2loc.asntype]="${BASH_REMATCH[1]}"
+        [[ "$j" =~ Country\ [^[]*\[([A-Z]{2})\] ]] && G[ip2loc.cc]="${BASH_REMATCH[1]}"
+        [[ "$j" =~ Fraud\ Score\ ([0-9]+) ]] && G[ip2loc.risk]="${BASH_REMATCH[1]}"
+        local pt=""; [[ "$j" =~ Proxy\ Type\ ([A-Z]{2,4}|-) ]] && pt="${BASH_REMATCH[1]}"
+        G[ip2loc.vpn]=$([[ "$pt" == VPN ]] && echo true || echo false)
+        G[ip2loc.tor]=$([[ "$pt" == TOR ]] && echo true || echo false)
+        G[ip2loc.proxy]=$([[ "$pt" =~ ^(PUB|WEB|RES|CPN|EPN)$ ]] && echo true || echo false)
+        G[ip2loc.server]=$([[ "$pt" == DCH || "${G[ip2loc.asntype]}" == DCH ]] && echo true || echo false)
+        G[ip2loc.robot]=$([[ "$pt" == SES ]] && echo true || echo false)
+    fi
+    # AbuseIPDB: только с ключом (страница закрыта проверкой Cloudflare)
+    if [[ -z "${ABUSEIPDB_KEY:-}" ]]; then
+        G[abuseipdb.asntype]=nokey
+    else
+        j=$(cat "$d/abuseipdb" 2>/dev/null)
+        if jq -e .data.ipAddress >/dev/null 2>&1 <<<"$j"; then
+            eval "$(jq -r '.data | @sh "
+                G[abuseipdb.cc]=\(.countryCode // "")
+                G[abuseipdb.asntype]=\(.usageType // "")
+                G[abuseipdb.risk]=\(.abuseConfidenceScore // "")
+                G[abuseipdb.tor]=\(.isTor // false)
+                G[abuseipdb.abuser]=\((.abuseConfidenceScore // 0) >= 25)
+                G[abuseipdb.server]=\((.usageType // "") | test("Data Center|Hosting"))
+                G[abuseipdb.robot]=\((.usageType // "") | test("Spider"))
+                G[abuseipdb.reports]=\(.totalReports // 0)"' <<<"$j")"
+        fi
     fi
     j=$(cat "$d/dbip" 2>/dev/null)
     if jq -e .countryCode >/dev/null 2>&1 <<<"$j"; then
@@ -180,51 +222,51 @@ gc_parse() {   # dir ip
 GC_SERVICES=(tiktok netflix youtube prime reddit chatgpt claude gemini)
 declare -A GC_SVC_TITLE=([tiktok]=TikTok [netflix]=Netflix [youtube]=YouTube [prime]=PrimeVideo [reddit]=Reddit [chatgpt]=ChatGPT [claude]=Claude [gemini]=Gemini)
 
-gc_service() {
-    local s="$1" body code r
+gc_service() {   # сервис [4|6]
+    local s="$1" v="${2:-4}" body code r
     case "$s" in
         tiktok)
-            body=$(_gc -L "https://www.tiktok.com/explore")
+            body=$(_gcv "$v" -L "https://www.tiktok.com/explore")
             r=$(grep -oE '"region":"[A-Z]{2}"' <<<"$body" | head -1 | cut -d'"' -f4)
             if [[ -n "$r" ]]; then echo "ok|$r"; elif [[ -n "$body" ]]; then echo "bad|"; else echo "none|"; fi;;
         netflix)
             local a b
-            a=$(_gc -L -o /dev/null -w '%{http_code} %{url_effective}' "https://www.netflix.com/title/81280792")
-            b=$(_gc -L -o /dev/null -w '%{http_code}' "https://www.netflix.com/title/70143836")
+            a=$(_gcv "$v" -L -o /dev/null -w '%{http_code} %{url_effective}' "https://www.netflix.com/title/81280792")
+            b=$(_gcv "$v" -L -o /dev/null -w '%{http_code}' "https://www.netflix.com/title/70143836")
             r=$(grep -oE 'netflix\.com/[a-z]{2}(-[a-z]{2})?/' <<<"$a" | sed -E 's#netflix\.com/([a-z]{2}).*#\1#' | tr '[:lower:]' '[:upper:]')
             if [[ "${a%% *}" == 200 && "$b" == 200 ]]; then echo "ok|${r:-US}"
             elif [[ "${a%% *}" == 200 || "$b" == 200 ]]; then echo "warn|$r"
             elif [[ "${a%% *}" == 403 ]]; then echo "bad|"
             else echo "none|"; fi;;
         youtube)
-            body=$(_gc -L -H 'Accept-Language: en' -b 'SOCS=CAI; CONSENT=YES+' "https://www.youtube.com/premium")
+            body=$(_gcv "$v" -L -H 'Accept-Language: en' -b 'SOCS=CAI; CONSENT=YES+' "https://www.youtube.com/premium")
             r=$(grep -oE '"GL":"[A-Z]{2}"' <<<"$body" | head -1 | cut -d'"' -f4)
             if [[ -z "$body" ]]; then echo "none|"
             elif grep -q 'www.google.cn' <<<"$body"; then echo "bad|CN"
             elif grep -qi 'Premium is not available in your country' <<<"$body"; then echo "bad|$r"
             else echo "ok|$r"; fi;;
         prime)
-            body=$(_gc -L "https://www.primevideo.com")
+            body=$(_gcv "$v" -L "https://www.primevideo.com")
             r=$(grep -oE '"currentTerritory":"[A-Z]{2}"' <<<"$body" | head -1 | cut -d'"' -f4)
             if grep -q '"isServiceRestricted":true' <<<"$body"; then echo "bad|"
             elif [[ -n "$r" ]]; then echo "ok|$r"; else echo "none|"; fi;;
         reddit)
-            code=$(_gc -o /dev/null -w '%{http_code}' "https://www.reddit.com/")
+            code=$(_gcv "$v" -o /dev/null -w '%{http_code}' "https://www.reddit.com/")
             case "$code" in 200|301|302) echo "ok|";; 403|429) echo "bad|";; *) echo "none|";; esac;;
         chatgpt)
             local c i
-            c=$(_gc "https://api.openai.com/compliance/cookie_requirements")
-            i=$(_gc "https://ios.chat.openai.com/")
-            r=$(_gc "https://chat.openai.com/cdn-cgi/trace" | sed -n 's/^loc=//p')
+            c=$(_gcv "$v" "https://api.openai.com/compliance/cookie_requirements")
+            i=$(_gcv "$v" "https://ios.chat.openai.com/")
+            r=$(_gcv "$v" "https://chat.openai.com/cdn-cgi/trace" | sed -n 's/^loc=//p')
             if [[ -z "$c$i" ]]; then echo "none|$r"
             elif grep -q 'unsupported_country' <<<"$c" || grep -q 'VPN' <<<"$i"; then echo "bad|$r"
             else echo "ok|$r"; fi;;
         claude)
-            r=$(_gc -o /dev/null -w '%{http_code} %{redirect_url}' "https://claude.ai/")
+            r=$(_gcv "$v" -o /dev/null -w '%{http_code} %{redirect_url}' "https://claude.ai/")
             if [[ "$r" == *unavailable* ]]; then echo "bad|"
             elif [[ "$r" == 2* || "$r" == 3* ]]; then echo "ok|"; else echo "none|"; fi;;
         gemini)
-            body=$(_gc "https://gemini.google.com")
+            body=$(_gcv "$v" "https://gemini.google.com")
             if grep -q '45631641,null,true' <<<"$body"; then echo "ok|"; else echo "none|"; fi;;
     esac
 }
@@ -255,43 +297,16 @@ gc_fetch_mail() {   # dir ip
 }
 
 # ---------- отчёт ----------
-ipquality_run() {
-    local ip="${1:-}" self=no
-    have jq || die "Нужен jq"
-    local me; me=$(public_ip)
-    [[ -z "$ip" ]] && ip="$me"
-    [[ -n "$ip" ]] || die "Не удалось определить IP"
-    [[ "$ip" == "$me" ]] && self=yes
-    local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
-
-    gc_fetch_dbs "$tmp" "$ip"
-    local s
-    if [[ "$self" == yes ]]; then
-        for s in "${GC_SERVICES[@]}"; do ( gc_service "$s" > "$tmp/svc_$s" ) & done
-        gc_fetch_mail "$tmp" "$ip"
-    fi
-    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0
-    while [[ -n "$(jobs -rp)" ]]; do
-        [[ -t 1 ]] && printf '\r  %s%s%s Опрашиваю базы и сервисы…' "$C_CYAN" "${spin:i++%10:1}" "$C_RESET"
-        sleep 0.15
-    done
-    [[ -t 1 ]] && printf '\r\033[K'
-
-    local -A G=(); gc_parse "$tmp" "$ip"
-    local W=78 sharp eq
-    sharp=$(printf '%*s' "$W" '' | tr ' ' '#'); eq=$(printf '%*s' "$W" '' | tr ' ' '=')
-
-    # ===== шапка =====
-    echo "$C_GRAY$sharp$C_RESET"
-    printf '%*s%s\n' 22 "" "${C_BOLD}ОТЧЁТ О КАЧЕСТВЕ IP: ${C_CYAN}${ip}${C_RESET}"
-    printf '%*s%s\n' 16 "" "${C_GRAY}fail2detect · по мотивам github.com/xykt/IPQuality${C_RESET}"
-    printf '%*s%s\n' 20 "" "Время отчёта: $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
-    echo "$C_GRAY$sharp$C_RESET"
-
-    # ===== 1. основное =====
-    section "1. Основная информация"
+# Разделы 1–4 для одного IP (данные — в G, объявленном вызывающим)
+gc_report_ip() {   # ip метка
+    local ip="$1" tag="$2" db t k
     local cc="${G[ipinfo.cc]:-${G[ipregistry.cc]:-${G[dbip.cc]:-}}}"
     local country="${G[ipregistry.country]:-${G[dbip.country]:-}}"
+    GC_LAST_CC="$cc"
+    printf '\n%s━━ %s: %s%s%s ━━%s\n' "$C_BOLD$C_MAGENTA" "$tag" "$C_CYAN" "$ip" "$C_BOLD$C_MAGENTA" "$C_RESET"
+
+    # ===== 1. основное =====
+    gc_section "1. Основная информация"
     printf '  %s %s\n' "$(label "ASN:")" "${G[ipinfo.asn]:-—}"
     printf '  %s %s\n' "$(label "Организация:")" "${G[ipinfo.asname]:-${G[ipinfo.org]:-—}}"
     [[ -n "${G[ipinfo.host]:-}" ]] && printf '  %s %s\n' "$(label "Хост (rDNS):")" "${G[ipinfo.host]}"
@@ -311,32 +326,36 @@ ipquality_run() {
     echo
 
     # ===== 2. тип использования =====
-    section "2. Тип IP (как его классифицируют базы)"
-    local cw=14 db t k
-    printf '  %s' "$(label "База:" 12)"
-    for db in ipinfo ipregistry ipapi proxycheck; do colhead "${GC_DB_TITLE[$db]}" "$cw"; done; echo
-    printf '  %s' "$(label "Сеть:" 12)"
-    for db in ipinfo ipregistry ipapi proxycheck; do
+    gc_section "2. Тип IP (как его классифицируют базы)"
+    local cw=12 types=(ipinfo ipregistry ipapi proxycheck ip2loc abuseipdb)
+    printf '  %s' "$(label "База:" 10)"
+    for db in "${types[@]}"; do colhead "${GC_DB_SHORT[$db]}" "$cw"; done; echo
+    printf '  %s' "$(label "Сеть:" 10)"
+    for db in "${types[@]}"; do
         if [[ "$db" == proxycheck ]]; then t="${G[proxycheck.type]:-}"; else t="${G[$db.asntype]:-}"; fi
-        read -r t k <<<"$(usage_ru "$t")"; badge "$k" "$t" "$cw"
+        read -r t k <<<"$(usage_ru "$t")"; badge "$k" "${t//_/ }" "$cw"
     done; echo
-    printf '  %s' "$(label "Компания:" 12)"
+    printf '  %s' "$(label "Компания:" 10)"
     for db in ipinfo ipregistry; do read -r t k <<<"$(usage_ru "${G[$db.comptype]:-}")"; badge "$k" "$t" "$cw"; done; echo
 
     # ===== 3. оценка риска =====
-    section "3. Оценка риска"
+    gc_section "3. Оценка риска"
     printf '  %s %s\n' "$(label "Шкала:" 14)" "$(risk_bar 100)"
-    # подписи над зонами шкалы: 0–20 % / 20–60 % / 60–100 % от 40 символов
     printf '  %s %s%s%s%s%s%s%s%s%s\n' "$(label "" 14)" "$T_GREEN" "$(pad низкий 8)" "$C_RESET" "$T_YELLOW" "$(pad средний 16)" "$C_RESET" "$T_RED" "высокий" "$C_RESET"
     local src score
-    for src in proxycheck scamalytics; do
+    for src in proxycheck scamalytics ip2loc abuseipdb; do
         score="${G[$src.risk]:-}"
+        if [[ "$src" == abuseipdb && -z "${ABUSEIPDB_KEY:-}" ]]; then
+            printf '  %s %sнужен бесплатный ключ: fail2detect config ABUSEIPDB_KEY <ключ>%s\n' "$(label "${GC_DB_TITLE[$src]}:" 14)" "$C_GRAY" "$C_RESET"
+            continue
+        fi
         read -r t k <<<"$(risk_level "$score")"
-        printf '  %s %s %3s %s\n' "$(label "${GC_DB_TITLE[$src]}:" 14)" "$(risk_bar "${score:-0}")" "${score:-—}" "$(badge "$k" "${t//_/ }")"
+        local extra=""; [[ "$src" == abuseipdb && -n "${G[abuseipdb.reports]:-}" ]] && extra=" ${C_GRAY}жалоб: ${G[abuseipdb.reports]}${C_RESET}"
+        printf '  %s %s %3s %s%s\n' "$(label "${GC_DB_TITLE[$src]}:" 14)" "$(risk_bar "${score:-0}")" "${score:-—}" "$(badge "$k" "${t//_/ }")" "$extra"
     done
 
     # ===== 4. факторы риска =====
-    section "4. Факторы риска"
+    gc_section "4. Факторы риска"
     local fw=11 f
     printf '  %s' "$(label "База:" 10)"
     for db in "${GC_DBS[@]}"; do colhead "${GC_DB_SHORT[$db]}" "$fw"; done; echo
@@ -352,40 +371,92 @@ ipquality_run() {
         for db in "${GC_DBS[@]}"; do yn_badge "${G[$db.$k]:-}" "$fw"; done; echo
     done
 
+    # кто считает IP VPN/прокси — копим для итога
+    for db in "${GC_DBS[@]}"; do
+        [[ "${G[$db.vpn]:-}" == true || "${G[$db.proxy]:-}" == true ]] && GC_FLAGS+=("${GC_DB_TITLE[$db]} ($tag)")
+    done
+    return 0
+}
+
+ipquality_run() {   # [ip]
+    have jq || die "Нужен jq"
+    local self=no targets=() tags=() v4 v6
+    if [[ -n "${1:-}" ]]; then
+        is_ip "$1" || die "Неверный IP: $1"
+        targets=("$1"); tags=("$([[ "$1" == *:* ]] && echo IPv6 || echo IPv4)")
+    else
+        self=yes
+        v4=$(curl -4 -sS --max-time 6 https://api.ipify.org 2>/dev/null)
+        v6=$(curl -6 -sS --max-time 6 https://api6.ipify.org 2>/dev/null)
+        is_ipv4 "$v4" && { targets+=("$v4"); tags+=(IPv4); }
+        [[ "$v6" == *:* ]] && { targets+=("$v6"); tags+=(IPv6); }
+        ((${#targets[@]})) || die "Не удалось определить IP сервера"
+    fi
+    local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+
+    local i s vers=()
+    for i in "${!targets[@]}"; do mkdir -p "$tmp/$i"; gc_fetch_dbs "$tmp/$i" "${targets[i]}"; done
     if [[ "$self" == yes ]]; then
-        # ===== 5. сервисы =====
-        section "5. Доступность медиа- и AI-сервисов"
+        [[ -n "${v4:-}" ]] && is_ipv4 "$v4" && vers+=(4)
+        [[ "${v6:-}" == *:* ]] && vers+=(6)
+        for v in "${vers[@]}"; do
+            for s in "${GC_SERVICES[@]}"; do ( gc_service "$s" "$v" > "$tmp/svc_${s}_$v" ) & done
+        done
+        is_ipv4 "${v4:-}" && gc_fetch_mail "$tmp" "$v4"
+    fi
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' n=0
+    while [[ -n "$(jobs -rp)" ]]; do
+        [[ -t 1 ]] && printf '\r  %s%s%s Опрашиваю базы и сервисы…' "$C_CYAN" "${spin:n++%10:1}" "$C_RESET"
+        sleep 0.15
+    done
+    [[ -t 1 ]] && printf '\r\033[K'
+
+    local W=78 sharp eq
+    sharp=$(printf '%*s' "$W" '' | tr ' ' '#'); eq=$(printf '%*s' "$W" '' | tr ' ' '=')
+    echo "$C_GRAY$sharp$C_RESET"
+    printf '%*s%s\n' 22 "" "${C_BOLD}ОТЧЁТ О КАЧЕСТВЕ IP${C_RESET}  ${C_CYAN}${targets[*]}${C_RESET}"
+    printf '%*s%s\n' 16 "" "${C_GRAY}fail2detect · по мотивам github.com/xykt/IPQuality${C_RESET}"
+    printf '%*s%s\n' 20 "" "Время отчёта: $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+    echo "$C_GRAY$sharp$C_RESET"
+
+    GC_FLAGS=()
+    for i in "${!targets[@]}"; do
+        local -A G=()
+        gc_parse "$tmp/$i" "${targets[i]}"
+        gc_report_ip "${targets[i]}" "${tags[i]}"
+        unset G
+    done
+
+    if [[ "$self" == yes ]]; then
+        # ===== 5. сервисы (по IPv4 и IPv6) =====
+        printf '\n'; gc_section "5. Доступность медиа- и AI-сервисов"
         local sw=12 grp g r
         for grp in "tiktok netflix youtube prime" "reddit chatgpt claude gemini"; do
             printf '  %s' "$(label "Сервис:" 10)"
             for s in $grp; do colhead "${GC_SVC_TITLE[$s]}" "$sw"; done; echo
-            printf '  %s' "$(label "Статус:" 10)"
-            for s in $grp; do
-                IFS='|' read -r g r < "$tmp/svc_$s"
-                case "$g" in ok) badge ok "Да" "$sw";; warn) badge warn "Частично" "$sw";; bad) badge bad "Блок" "$sw";; *) badge none "?" "$sw";; esac
-            done; echo
-            printf '  %s' "$(label "Регион:" 10)"
-            for s in $grp; do
-                IFS='|' read -r g r < "$tmp/svc_$s"
-                if [[ -z "$r" ]]; then badge none "" "$sw"
-                elif [[ -n "$cc" && "$r" != "$cc" ]]; then badge warn "[$r]" "$sw"
-                else badge ok "[$r]" "$sw"; fi
-            done; echo
+            for v in "${vers[@]}"; do
+                printf '  %s' "$(label "IPv$v:" 10)"
+                for s in $grp; do
+                    IFS='|' read -r g r < "$tmp/svc_${s}_$v"
+                    case "$g" in ok) badge ok "Да${r:+ $r}" "$sw";; warn) badge warn "Частично${r:+ $r}" "$sw";;
+                                 bad) badge bad "Блок${r:+ $r}" "$sw";; *) badge none "?" "$sw";; esac
+                done; echo
+            done
         done
 
-        # ===== 6. почта =====
-        section "6. Почта: порт 25 и чёрные списки"
-        local m name ok25=0
-        for m in "${GC_MX[@]}"; do [[ "$(cat "$tmp/mx/${m%%:*}" 2>/dev/null)" == ok ]] && ok25=1; done
-        printf '  %s ' "$(label "Исходящий порт 25:" 20)"
-        if (( ok25 )); then badge ok "открыт"; else badge bad "закрыт провайдером"; fi; echo
-        printf '  %s ' "$(label "Подключение:" 20)"
-        for m in "${GC_MX[@]}"; do
-            name="${m%%:*}"
-            if [[ "$(cat "$tmp/mx/$name" 2>/dev/null)" == ok ]]; then badge ok "$name"; else badge bad "$name"; fi
-            printf ' '
-        done; echo
-        if [[ -d "$tmp/bl" ]] && is_ipv4 "$ip"; then
+        # ===== 6. почта (IPv4) =====
+        if is_ipv4 "${v4:-}"; then
+            gc_section "6. Почта: порт 25 и чёрные списки (IPv4)"
+            local m name ok25=0
+            for m in "${GC_MX[@]}"; do [[ "$(cat "$tmp/mx/${m%%:*}" 2>/dev/null)" == ok ]] && ok25=1; done
+            printf '  %s ' "$(label "Исходящий порт 25:" 20)"
+            if (( ok25 )); then badge ok "открыт"; else badge bad "закрыт провайдером"; fi; echo
+            printf '  %s ' "$(label "Подключение:" 20)"
+            for m in "${GC_MX[@]}"; do
+                name="${m%%:*}"
+                if [[ "$(cat "$tmp/mx/$name" 2>/dev/null)" == ok ]]; then badge ok "$name"; else badge bad "$name"; fi
+                printf ' '
+            done; echo
             local clean=0 listed=0 errs=0 lst=() z
             for z in "${GC_DNSBL[@]}"; do
                 case "$(cat "$tmp/bl/$z" 2>/dev/null)" in
@@ -401,14 +472,10 @@ ipquality_run() {
     fi
     echo "$C_GRAY$eq$C_RESET"
 
-    # вывод для ноды VPN
-    local flags=()
-    for db in "${GC_DBS[@]}"; do
-        [[ "${G[$db.vpn]:-}" == true || "${G[$db.proxy]:-}" == true ]] && flags+=("${GC_DB_TITLE[$db]}")
-    done
-    if ((${#flags[@]})); then
-        warn "IP помечен как VPN/прокси: ${flags[*]}. Сервисы, которые опираются на эти базы, могут ограничивать клиентов ноды."
+    if ((${#GC_FLAGS[@]})); then
+        warn "IP помечен как VPN/прокси: ${GC_FLAGS[*]}. Сервисы, которые опираются на эти базы, могут ограничивать клиентов ноды."
     else
-        ok "Ни одна база не считает этот IP VPN/прокси."
+        ok "Ни одна база не считает IP VPN/прокси."
     fi
+    [[ -z "${ABUSEIPDB_KEY:-}" ]] && info "AbuseIPDB: бесплатный ключ — abuseipdb.com → Account → API, затем: fail2detect config ABUSEIPDB_KEY <ключ>"
 }

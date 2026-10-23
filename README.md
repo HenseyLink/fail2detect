@@ -156,10 +156,10 @@ fail2detect speed --tui       # полноэкранный cloudflare-speed-cli 
 
 В конце отчёта перечислено, кто видит не ту страну. Способы определения регионов взяты из [ipregion](https://github.com/vernette/ipregion) (MIT), код свой.
 
-**IPQuality** — отчёт о репутации IP. Его структура повторяет [IPQuality](https://github.com/xykt/IPQuality), но код свой. Опрашиваются только открытые источники без ключей: IPinfo, ipregistry, ip-api, proxycheck.io, Scamalytics, IP2Location и DB-IP. Разделы отчёта:
+**IPQuality** — отчёт о репутации IP. Его структура повторяет [IPQuality](https://github.com/xykt/IPQuality), но код свой. Если у сервера есть IPv6, разделы 1–4 строятся отдельно для IPv4 и IPv6, а сервисы проверяются по обоим протоколам. Источники: IPinfo, ipregistry, ip-api, proxycheck.io, Scamalytics, IP2Location, DB-IP и AbuseIPDB. AbuseIPDB работает только с бесплатным ключом (abuseipdb.com → Account → API), который задаётся командой `fail2detect config ABUSEIPDB_KEY <ключ>`. Без ключа его колонка помечена «нужен ключ». Разделы отчёта:
 1. **Основное:** ASN, организация, rDNS, подсеть, координаты, фактический регион и регион регистрации, тип IP (нативный или вещательный).
-2. **Тип IP:** провайдер, хостинг, мобильный или VPN — по мнению каждой базы.
-3. **Оценка риска:** шкалы proxycheck и Scamalytics.
+2. **Тип IP:** провайдер, хостинг, мобильный или VPN — по мнению каждой базы, включая IP2Location и AbuseIPDB.
+3. **Оценка риска:** шкалы proxycheck, Scamalytics, IP2Location (Fraud Score) и AbuseIPDB (Confidence of Abuse, число жалоб).
 4. **Факторы риска:** таблица «база × прокси / Tor / VPN / сервер / абьюзер / бот».
 5. **Сервисы:** доступность TikTok, Netflix, YouTube Premium, Prime Video, Reddit, ChatGPT, Claude, Gemini.
 6. **Почта:** исходящий порт 25, подключение к почтовым сервисам, около 20 чёрных списков (DNSBL).

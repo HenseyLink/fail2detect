@@ -168,6 +168,7 @@ config_defaults() {
     CERT_METHOD=""              # http | cloudflare (спросит при первом сертификате)
     CERT_EMAIL=""
     NODE_TLS_DOMAIN=""          # домен, чей сертификат лежит в ноде (/etc/xray-certs)
+    ABUSEIPDB_KEY=""            # бесплатный ключ AbuseIPDB для IPQuality (необязательно)
     TG_BOT_TOKEN=""             # уведомления о банах (необязательно)
     TG_CHAT_ID=""
 }
