@@ -17,6 +17,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/
 
 Скрипт ставит зависимости (`nftables curl jq`), копирует файлы в `/opt/fail2detect` и создаёт команду `fail2detect`. Затем он предлагает запустить мастер настройки.
 
+Первым шагом мастер подключает панель Remnawave. Он спрашивает адрес панели (если панель ставил eGames — ссылку входа целиком, ключ из неё fail2detect возьмёт сам) и API-токен (Панель → Настройки → API токены). Подключение сразу проверяется, а при ошибке мастер говорит, что не так: токен, ключ eGames, адрес или фаервол.
+
 Если запустить `fail2detect` без аргументов, откроется интерактивное меню.
 
 ## Что делает
@@ -140,10 +142,21 @@ API-токен берётся в таком порядке:
 ### 6. GeoCheck и Cloudflare Speedtest
 
 ```bash
-fail2detect geo        # страна IP по 7 гео-базам + YouTube, Netflix, ChatGPT, Claude, Gemini, Google, Steam
-fail2detect speed      # задержка, джиттер, скачивание/загрузка через speed.cloudflare.com
+fail2detect geo          # отчёт о качестве IP этого сервера
+fail2detect geo 1.2.3.4  # отчёт по другому IP (разделы 1–4)
+fail2detect speed        # задержка, джиттер, скачивание/загрузка через speed.cloudflare.com
 fail2detect speed --tui  # полноэкранный cloudflare-speed-cli (kavehtehrani), ставится по запросу
 ```
+
+Структура отчёта GeoCheck повторяет [IPQuality](https://github.com/xykt/IPQuality), но код свой. Опрашиваются только открытые источники без ключей: IPinfo, ipregistry, ip-api, proxycheck.io, Scamalytics, IP2Location и DB-IP. Разделы отчёта:
+1. **Основное:** ASN, организация, rDNS, подсеть, координаты, фактический регион и регион регистрации, тип IP (нативный или вещательный).
+2. **Тип IP:** провайдер, хостинг, мобильный или VPN — по мнению каждой базы.
+3. **Оценка риска:** шкалы proxycheck и Scamalytics.
+4. **Факторы риска:** таблица «база × прокси / Tor / VPN / сервер / абьюзер / бот».
+5. **Сервисы:** TikTok, Netflix, YouTube Premium, Prime Video, Reddit, ChatGPT, Claude, Gemini — доступность и регион.
+6. **Почта:** исходящий порт 25, подключение к почтовым сервисам, около 20 чёрных списков (DNSBL).
+
+Для ноды VPN самые важные разделы 2–4: по ним сервисы отличают VPN-сервер от обычного абонента. В конце отчёта перечислено, какие базы уже пометили IP как VPN или прокси.
 
 ### 7. Аудит безопасности
 

@@ -63,6 +63,88 @@ rw_api() {
     fi
 }
 
+# Проверка API с диагнозом: печатает "код|число_профилей" (код 000 — нет соединения)
+rw_probe() {
+    local token hdr out code
+    token=$(F2D_NO_PROMPT=1 rw_token) || { echo "notoken|0"; return; }
+    hdr=$(printf 'Authorization: Bearer %s\nX-Forwarded-For: 127.0.0.1\nX-Forwarded-Proto: https\n' "$token")
+    [[ -n "${RW_API_COOKIE:-}" ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
+    out=$(mktemp)
+    local rc=0
+    code=$(curl -sS -o "$out" -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+        "${RW_API_URL%/}/api/config-profiles" -H @<(printf '%s' "$hdr") </dev/null 2>/dev/null) || rc=$?
+    if [[ -z "$code" || "$code" == 000 ]]; then
+        case "$rc" in
+            52|56) code=444;;   # соединение закрыто без ответа — так nginx eGames отвечает без ключа
+            6) code=dns;; 28) code=timeout;; *) code=000;;
+        esac
+    fi
+    local n; n=$(jq -r '.response.configProfiles | length' "$out" 2>/dev/null)
+    echo "$code|${n:-0}"
+    rm -f "$out"
+}
+
+rw_probe_explain() {   # код -> человеческое объяснение
+    case "$1" in
+        200) echo "подключено";;
+        notoken) echo "токен не задан";;
+        000) echo "нет соединения с $RW_API_URL — сервер недоступен или порт закрыт";;
+        dns) echo "домен из $RW_API_URL не резолвится — проверьте адрес";;
+        timeout) echo "панель не ответила за 15 с — фаервол панели или неверный адрес";;
+        401|403) echo "панель отвергла токен (HTTP $1) — проверьте API-токен";;
+        444|400|"") echo "nginx панели закрыл соединение — нужен ключ eGames (ссылка входа целиком)";;
+        404) echo "по этому адресу нет API Remnawave (HTTP 404) — нужен адрес панели";;
+        5*) echo "панель ответила ошибкой HTTP $1";;
+        *) echo "неожиданный ответ HTTP $1";;
+    esac
+}
+
+# Шаг мастера: адрес/ссылка панели + API-токен, с проверкой
+rw_setup_interactive() {
+    title "Подключение к панели Remnawave"
+    echo "  Нужно для смены порта и транспорта нод и проверки inbound'ов в doctor."
+    echo "  Токен: Панель → Настройки → API токены → создать."
+    if has_panel; then
+        config_set RW_API_URL "http://127.0.0.1:3000"
+        info "Панель на этом сервере — API: http://127.0.0.1:3000"
+    else
+        local cur=""; [[ "$RW_API_URL" != http://127.0.0.1:3000 ]] && cur="$RW_API_URL"
+        echo "  Вставьте адрес панели (https://panel.example.com) или, если панель ставил"
+        echo "  скрипт eGames, ссылку входа ЦЕЛИКОМ — с ?ключом=значением на конце."
+        ask "Панель (пусто — пропустить)" "$cur"
+        [[ -z "$REPLY" ]] && { info "Пропущено. Позже: fail2detect config RW_API_URL <ссылка>"; return 0; }
+        [[ "$REPLY" =~ ^https?:// ]] || REPLY="https://$REPLY"
+        config_set RW_API_URL "$REPLY"; rw_normalize_url
+        [[ -n "${RW_API_COOKIE:-}" ]] && ok "Ключ входа eGames сохранён (RW_API_COOKIE)"
+    fi
+    local try code n need_token=no
+    F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1 || need_token=yes
+    for try in 1 2 3; do
+        if [[ "$need_token" == yes ]]; then
+            local t; read -r -s -p "$(printf '%s?%s API-токен панели (пусто — пропустить): ' "$C_YELLOW" "$C_RESET")" t; echo
+            [[ -z "$t" ]] && { info "Пропущено. Позже: fail2detect config RW_API_TOKEN <токен>"; return 0; }
+            install -m 600 /dev/null "$RW_TOKEN_FILE"; printf '%s' "$t" > "$RW_TOKEN_FILE"
+            config_set RW_API_TOKEN ""; RW_API_TOKEN=""; _RW_TOKEN=""
+        fi
+        info "Проверяю API…"
+        IFS='|' read -r code n <<<"$(rw_probe)"
+        if [[ "$code" == 200 ]]; then
+            ok "Панель подключена: профилей конфигурации — $n"
+            audit_write PANEL - - - "подключена панель $RW_API_URL"
+            return 0
+        fi
+        warn "$(rw_probe_explain "$code")"
+        [[ "$code" =~ ^(401|403|notoken)$ ]] && need_token=yes || need_token=no
+        if [[ "$code" =~ ^(444|400)$ && -z "${RW_API_COOKIE:-}" ]] && ! has_panel; then
+            ask "Ключ eGames name=value (или ссылка входа целиком; пусто — нет ключа)" ""
+            if [[ "$REPLY" == http* ]]; then config_set RW_API_URL "$REPLY"; rw_normalize_url
+            elif [[ -n "$REPLY" ]]; then config_set RW_API_COOKIE "$REPLY"; fi
+        fi
+        confirm "Попробовать ещё раз?" y || break
+    done
+    warn "Панель не подключена — fail2detect работает и без неё (кроме смены порта/транспорта)."
+}
+
 rw_api_ok() {   # проверка доступа к API
     local r; r=$(rw_api GET /api/config-profiles 2>/dev/null)
     jq -e '.response.configProfiles' >/dev/null 2>&1 <<<"$r"
