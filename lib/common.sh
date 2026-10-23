@@ -59,6 +59,34 @@ confirm() {
     is_yes "$REPLY"
 }
 
+# Ввод секрета (токены): вставка ВИДНА — в скрытом режиме (read -s) кажется,
+# что вставить не получилось, а терминалы с bracketed paste подмешивают в
+# значение \e[200~…\e[201~. После Enter строка стирается и вместо неё
+# показывается маска. Результат — в REPLY.
+mask_secret() {
+    local v="$1"
+    if (( ${#v} <= 12 )); then echo "${v:0:2}… (${#v} симв.)"; else echo "${v:0:4}…${v: -4} (${#v} симв.)"; fi
+}
+read_secret() {   # "вопрос"
+    local prompt="$1" v="" plain lines cols
+    printf '%s?%s %s: ' "$C_YELLOW" "$C_RESET" "$prompt" >&2
+    IFS= read -r v || true
+    v="${v//$'\e[200~'/}"; v="${v//$'\e[201~'/}"; v="${v//[$'\r\t ']/}"
+    if [[ -t 2 ]]; then
+        # стереть всё, что заняли вопрос и вставленное значение (с учётом переноса строк)
+        cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}'); [[ "$cols" =~ ^[0-9]+$ && cols -gt 0 ]] || cols=80
+        plain="? $prompt: $v"
+        lines=$(( (${#plain} + cols - 1) / cols )); (( lines < 1 )) && lines=1
+        printf '\033[%dA\r\033[J' "$lines" >&2
+        if [[ -n "$v" ]]; then
+            printf '%s?%s %s: %s%s%s\n' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GREEN" "$(mask_secret "$v")" "$C_RESET" >&2
+        else
+            printf '%s?%s %s: %sпусто%s\n' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GRAY" "$C_RESET" >&2
+        fi
+    fi
+    REPLY="$v"
+}
+
 # «да» — любой ответ, начинающийся с y/д (y, yy, yes, да, Д…)
 is_yes() { [[ "${1:-}" =~ ^[[:space:]]*[yYдД] ]]; }
 

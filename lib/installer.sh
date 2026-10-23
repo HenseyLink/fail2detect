@@ -178,7 +178,7 @@ install_sub() {
     title "Страница подписки на отдельном сервере"
     ask_domain "Домен страницы подписки"; local sdomain="$REPLY"
     ask "URL панели (https://panel.example.com)"; local purl="${REPLY%/}"
-    local tok; read -r -s -p "API-токен панели (Настройки → API токены): " tok; echo
+    local tok; read_secret "API-токен панели (Настройки → API токены)"; tok="$REPLY"
     cert_ensure "$sdomain" || return 1
     mkdir -p "$RW_SUB_DIR"; cd "$RW_SUB_DIR" || return 1
     curl -fsSL "$RW_RAW_SUBPAGE/docker-compose-prod.yml" -o docker-compose.yml || return 1

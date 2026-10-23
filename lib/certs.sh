@@ -43,7 +43,7 @@ cert_ask_method() {
     if [[ "$REPLY" == 2 ]]; then
         config_set CERT_METHOD cloudflare
         if [[ ! -s "$CF_INI" ]]; then
-            local tok; read -r -s -p "Cloudflare API token: " tok; echo
+            local tok; read_secret "Cloudflare API token (вставьте)"; tok="$REPLY"
             install -m 600 /dev/null "$CF_INI"
             printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$CF_INI"
         fi

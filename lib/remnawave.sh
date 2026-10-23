@@ -41,7 +41,7 @@ rw_token() {
     if [[ -z "$t" && ( -n "${F2D_NO_PROMPT:-}" || ! -t 0 ) ]]; then return 1; fi
     if [[ -z "$t" ]]; then
         warn "Нужен API-токен панели (Панель → Настройки → API токены)."
-        read -r -s -p "Вставьте токен: " t; echo
+        read_secret "Вставьте API-токен панели"; t="$REPLY"
         [[ -n "$t" ]] || return 1
         install -m 600 /dev/null "$RW_TOKEN_FILE"; printf '%s' "$t" > "$RW_TOKEN_FILE"
     fi
@@ -121,7 +121,7 @@ rw_setup_interactive() {
     F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1 || need_token=yes
     for try in 1 2 3; do
         if [[ "$need_token" == yes ]]; then
-            local t; read -r -s -p "$(printf '%s?%s API-токен панели (пусто — пропустить): ' "$C_YELLOW" "$C_RESET")" t; echo
+            local t; read_secret "API-токен панели (вставьте; пусто — пропустить)"; t="$REPLY"
             [[ -z "$t" ]] && { info "Пропущено. Позже: fail2detect config RW_API_TOKEN <токен>"; return 0; }
             install -m 600 /dev/null "$RW_TOKEN_FILE"; printf '%s' "$t" > "$RW_TOKEN_FILE"
             config_set RW_API_TOKEN ""; RW_API_TOKEN=""; _RW_TOKEN=""
