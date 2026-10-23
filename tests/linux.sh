@@ -86,6 +86,17 @@ awk '/remnawave-nginx:/,/remnanode:/' "$WORK/node/docker-compose.yml" | grep -q 
 node_compose_add_certs && fail "повторный запуск изменил файл" || pass "повторный запуск ничего не меняет"
 STUB_NODE=yes
 
+section "Защита администратора"
+# shellcheck disable=SC2329
+journalctl() { printf '%s\n' "Accepted publickey for root from 77.1.1.1 port 51000 ssh2: ED25519 SHA256:x" "Failed password for root from 77.2.2.2 port 1 ssh2"; }
+# shellcheck disable=SC2329
+who() { [[ "${1:-}" == --ips ]] && echo "root     pts/0        2026-10-23 22:00 88.3.3.3"; }
+[[ -n "$(ban_ignored 77.1.1.1)" ]] && pass "успешный вход по SSH → не банится" || fail "успешный вход по SSH → не банится"
+[[ -n "$(ban_ignored 88.3.3.3)" ]] && pass "открытая SSH-сессия → не банится" || fail "открытая SSH-сессия → не банится"
+[[ -z "$(ban_ignored 77.2.2.2)" ]] && pass "неудачный вход → банится" || fail "неудачный вход → банится"
+unset -f journalctl who
+is_yes yy && is_yes "Да" && is_yes " y" && ! is_yes n && ! is_yes "" && pass "is_yes: yy/Да/y — да, n/пусто — нет" || fail "is_yes"
+
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
 [[ "$("$ROOT/fail2detect" version)" == "fail2detect $F2D_VERSION" ]] && pass "fail2detect version" || fail "fail2detect version"

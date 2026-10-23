@@ -90,7 +90,22 @@ ban_ignored() {   # почему этот IP банить нельзя (пуст
     [[ -n "${F2D_SELF_IP:-}" && "$ip" == "$F2D_SELF_IP" ]] && { echo "собственный IP"; return; }
     # адрес текущей SSH-сессии администратора
     [[ -n "${SSH_CLIENT:-}" && "$ip" == "${SSH_CLIENT%% *}" ]] && { echo "ваша SSH-сессия"; return; }
+    # демон работает под systemd и SSH_CLIENT не видит — смотрим, кто реально вошёл
+    admin_ips | grep -qxF "$ip" && { echo "IP администратора (успешный вход по SSH)"; return; }
     return 0
+}
+
+# IP, прошедшие аутентификацию SSH: открытые сессии + успешные входы за 24 ч
+admin_ips() {
+    {
+        who --ips 2>/dev/null | awk '{print $NF}'
+        who 2>/dev/null | grep -oE '\([0-9a-fA-F:.]+\)' | tr -d '()'
+        if have journalctl; then
+            journalctl -t sshd -t sshd-session --since "-24h" -o cat --no-pager 2>/dev/null
+        else
+            tail -n 20000 /var/log/auth.log /var/log/secure 2>/dev/null
+        fi | sed -nE 's/.*Accepted [^ ]+ for .* from ([0-9a-fA-F:.]+) port .*/\1/p'
+    } | sort -u
 }
 
 _with_lock() { mkdir -p "$F2D_STATE_DIR"; ( flock -w 10 9; "$@" ) 9>"$F2D_LOCK"; }
@@ -346,6 +361,7 @@ jail_test() {
     local -A per=()
     while IFS= read -r line; do
         n=$((n + 1))
+        [[ -n "$J_IGNORE" && "$line" =~ $J_IGNORE ]] && continue
         for f in "${re[@]}"; do
             if [[ "$line" =~ $f ]]; then
                 ip=""

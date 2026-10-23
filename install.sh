@@ -35,16 +35,28 @@ rm -rf "$DEST.new"; mkdir -p "$DEST.new"
 cp -a "$tmp/src/fail2detect" "$tmp/src/lib" "$tmp/src/conf" "$tmp/src/systemd" "$DEST.new/"
 [[ -f "$tmp/src/README.md" ]] && cp "$tmp/src/README.md" "$DEST.new/"
 rm -rf "$DEST.old"; [[ -d "$DEST" ]] && mv "$DEST" "$DEST.old"
-mv "$DEST.new" "$DEST"; rm -rf "$DEST.old"
+mv "$DEST.new" "$DEST"
 chmod 755 "$DEST/fail2detect"
 ln -sf "$DEST/fail2detect" /usr/local/bin/fail2detect
 
 mkdir -p /etc/fail2detect/jail.d /var/lib/fail2detect /var/log/fail2detect
 chmod 700 /etc/fail2detect /var/lib/fail2detect
 [[ -f /etc/fail2detect/fail2detect.conf ]] || install -m 600 "$DEST/conf/fail2detect.conf" /etc/fail2detect/fail2detect.conf
+# jail'ы: новые — ставим; не изменённые пользователем (кроме ENABLED) — обновляем,
+# сохраняя его ENABLED; изменённые вручную — не трогаем
 for f in "$DEST"/conf/jail.d/*.conf; do
-    [[ -f "/etc/fail2detect/jail.d/$(basename "$f")" ]] || install -m 644 "$f" /etc/fail2detect/jail.d/
+    name=$(basename "$f"); cur="/etc/fail2detect/jail.d/$name"; old="$DEST.old/conf/jail.d/$name"
+    if [[ ! -f "$cur" ]]; then
+        install -m 644 "$f" "$cur"
+    elif [[ -f "$old" ]] && ! cmp -s "$f" "$old" && \
+         diff -q <(grep -v '^ENABLED=' "$cur") <(grep -v '^ENABLED=' "$old") >/dev/null; then
+        en=$(grep -m1 '^ENABLED=' "$cur")
+        install -m 644 "$f" "$cur"
+        [[ -n "$en" ]] && sed -i "s/^ENABLED=.*/$en/" "$cur"
+        echo "jail $name обновлён"
+    fi
 done
+rm -rf "$DEST.old"
 
 if [[ "$MODE" == --update ]]; then
     for u in fail2detect.service fail2detect-blocklist.service fail2detect-blocklist.timer; do

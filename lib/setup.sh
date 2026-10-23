@@ -86,7 +86,10 @@ setup_wizard() {
 
     [[ "$(fw_mode)" == ufw ]] && ufw_harden
     [[ -n "$BLOCKLISTS" ]] && blocklist_update
-    fw_apply --safe || return 1
+    if ! fw_apply --safe; then
+        err "Правила откачены — службы fail2detect НЕ включены. Проверьте доступ и запустите мастер снова."
+        return 1
+    fi
     install_services
     audit_write SETUP - - - "мастер настройки завершён"
     echo
@@ -182,7 +185,9 @@ doctor() {
 
     if has_node || has_panel; then
         title "Remnawave / Xray"
-        if rw_api_ok 2>/dev/null; then
+        if [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; then
+            _chk warn "Панель на другом сервере — inbound'ы проверяются на сервере панели" "или: fail2detect config RW_API_URL https://панель + токен"
+        elif F2D_NO_PROMPT=1 rw_api_ok 2>/dev/null; then
             local tag port tr
             while IFS=$'\t' read -r _ _ tag port _ tr; do
                 case "$tr" in

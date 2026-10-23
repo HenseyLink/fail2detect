@@ -58,8 +58,11 @@ confirm() {
     [[ "${F2D_ASSUME_YES:-0}" == 1 ]] && return 0
     read -r -p "$(printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$1" "$C_GRAY" "$hint" "$C_RESET")" REPLY
     REPLY="${REPLY:-$def}"
-    [[ "$REPLY" =~ ^([yYдД]|yes|да)$ ]]
+    is_yes "$REPLY"
 }
+
+# «да» — любой ответ, начинающийся с y/д (y, yy, yes, да, Д…)
+is_yes() { [[ "${1:-}" =~ ^[[:space:]]*[yYдД] ]]; }
 
 pause() { [[ -t 0 ]] && read -r -s -n1 -p "$(printf '%sНажмите любую клавишу…%s' "$C_GRAY" "$C_RESET")" && echo; }
 

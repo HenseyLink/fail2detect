@@ -252,18 +252,23 @@ fw_apply() {   # [--safe]
 # Защита от «отрезал себе SSH»: откат, если не подтвердили
 fw_confirm_or_rollback() {
     local t="${1:-60}" self; self=$(readlink -f "$F2D_BIN")
-    setsid bash -c "sleep $t; '$self' fw rollback --auto" >/dev/null 2>&1 < /dev/null &
-    echo $! > "$F2D_ROLLBACK_PID"
+    rm -f "$F2D_ROLLBACK_PID"
+    # PID пишет сам таймер: $! после setsid может оказаться не тем процессом
+    setsid bash -c "echo \$\$ > '$F2D_ROLLBACK_PID'; sleep $t; '$self' fw rollback --auto" >/dev/null 2>&1 < /dev/null &
     warn "Если SSH-доступ пропал, правила откатятся сами через ${t}с."
     printf '%s?%s Откройте НОВУЮ SSH-сессию и проверьте вход. Всё работает? [y/N]: ' "$C_YELLOW" "$C_RESET"
     local a=""
     read -r -t "$t" a || true
-    if [[ "$a" =~ ^([yYдД]|yes|да)$ ]]; then
-        kill "$(cat "$F2D_ROLLBACK_PID")" 2>/dev/null; rm -f "$F2D_ROLLBACK_PID"
+    local i; for i in 1 2 3 4 5; do [[ -s "$F2D_ROLLBACK_PID" ]] && break; sleep 0.2; done
+    local pid; pid=$(cat "$F2D_ROLLBACK_PID" 2>/dev/null)
+    # убиваем всю группу таймера (bash + sleep)
+    [[ -n "$pid" ]] && { kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null; }
+    rm -f "$F2D_ROLLBACK_PID"
+    if is_yes "$a"; then
         ok "Подтверждено, правила сохранены"
     else
-        kill "$(cat "$F2D_ROLLBACK_PID")" 2>/dev/null; rm -f "$F2D_ROLLBACK_PID"
         fw_rollback
+        return 1
     fi
 }
 

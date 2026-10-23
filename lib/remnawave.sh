@@ -15,6 +15,8 @@ rw_token() {
     local t="$RW_API_TOKEN"
     [[ -z "$t" && -s "$RW_TOKEN_FILE" ]] && t=$(<"$RW_TOKEN_FILE")
     [[ -z "$t" && -s "$EGAMES_DIR/token" ]] && t=$(<"$EGAMES_DIR/token")
+    # без терминала (или в doctor) не спрашиваем — иначе «зависание» на скрытом вопросе
+    if [[ -z "$t" && ( -n "${F2D_NO_PROMPT:-}" || ! -t 0 ) ]]; then return 1; fi
     if [[ -z "$t" ]]; then
         warn "Нужен API-токен панели (Панель → Настройки → API токены)."
         read -r -s -p "Вставьте токен: " t; echo
