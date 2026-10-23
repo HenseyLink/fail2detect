@@ -14,10 +14,8 @@ F2D_BANS_DB="${F2D_STATE_DIR}/bans.tsv"
 F2D_NFT_FILE="${F2D_STATE_DIR}/fail2detect.nft"
 F2D_NFT_TABLE="fail2detect"
 
-# eGames remnawave-reverse-proxy
-EGAMES_DIR="/usr/local/remnawave_reverse"
-EGAMES_BIN="/usr/local/bin/remnawave_reverse"
-EGAMES_URL="https://raw.githubusercontent.com/eGamesAPI/remnawave-reverse-proxy/refs/heads/main/install_remnawave.sh"
+# совместимость с серверами, поставленными сторонним установщиком remnawave-reverse-proxy
+RP_DIR="/usr/local/remnawave_reverse"
 RW_PANEL_DIR="/opt/remnawave"
 RW_NODE_DIR="/opt/remnanode"
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fail2detect — установка Remnawave: панель, нода, страница подписки.
 #
-# Не копия скрипта eGames: compose и .env панели и страницы подписки берутся из
-# официальных репозиториев Remnawave в момент установки, fail2detect только
-# подставляет секреты и домены. Отличия от eGames:
+# compose и .env панели и страницы подписки берутся из официальных
+# репозиториев Remnawave в момент установки, fail2detect только подставляет
+# секреты и домены. Возможности:
 #   * любой порт ноды (а не только 443);
 #   * транспорты: TCP/XHTTP/gRPC + Reality, XHTTP/gRPC + TLS, Hysteria 2;
 #   * сразу с защитой fail2detect (фаервол, баны, скрытая панель).
@@ -392,7 +392,7 @@ squad_add_inbound() {   # inbound_uuid [old_uuid]
     ok "Inbound добавлен в squad (пользователи его получат)"
 }
 
-# JSON inbound'а для ручной вставки в профиль (нода, созданная вручную/eGames)
+# JSON inbound'а для ручной вставки в профиль (нода, созданная вручную или другим установщиком)
 node_inbound_json() {   # transport port [domain] [target]
     transport_valid "${1:-}" || die "fail2detect node inbound-json <транспорт> <порт> [домен] [target]"
     local keys priv pub; keys=$(x25519_keys); priv="${keys% *}"; pub="${keys#* }"

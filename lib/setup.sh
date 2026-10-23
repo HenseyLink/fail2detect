@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fail2detect — мастер настройки, установка через eGames, аудит безопасности.
+# fail2detect — мастер настройки и аудит безопасности.
 
 F2D_SHARE="${F2D_SHARE:-/opt/fail2detect}"
 
@@ -27,7 +27,7 @@ install_services() {
     ok "Службы fail2detect включены (демон + обновление блок-листов раз в сутки)"
 }
 
-# UFW после eGames: API ноды открыт только для панели, по умолчанию deny
+# UFW после установщика: API ноды открыт только для панели, по умолчанию deny
 ufw_harden() {
     ufw_active || return 0
     ufw default deny incoming >/dev/null
@@ -99,34 +99,6 @@ setup_wizard() {
     audit_write SETUP - - - "мастер настройки завершён"
     echo
     ok "Готово. Проверить итог: ${C_BOLD}fail2detect doctor${C_RESET}"
-}
-
-# ---------- установка Remnawave через скрипт eGames ----------
-egames_run() {
-    require_root
-    title "Remnawave Reverse-Proxy от eGames"
-    echo "  Установка панели, нод и страницы подписки выполняется оригинальным"
-    echo "  скриптом eGames: ${C_CYAN}https://github.com/eGamesAPI/remnawave-reverse-proxy${C_RESET}"
-    echo
-    warn "Ставьте ноду на порт 443 (как требует скрипт eGames)."
-    echo "  После установки порт и транспорт можно сменить: fail2detect node transport"
-    echo "  Или сразу ставьте ноду своим установщиком: fail2detect install node"
-    echo
-    if [[ -x "$EGAMES_BIN" ]]; then
-        "$EGAMES_BIN" || true
-    else
-        confirm "Скачать и запустить установщик eGames?" y || return 0
-        local tmp; tmp=$(mktemp -d)
-        curl -fsSL "$EGAMES_URL" -o "$tmp/install_remnawave.sh" || die "Не удалось скачать скрипт eGames"
-        bash -n "$tmp/install_remnawave.sh" || die "Скачанный скрипт повреждён"
-        bash "$tmp/install_remnawave.sh" || true
-        rm -rf "$tmp"
-    fi
-    load_config
-    if has_panel || has_node; then
-        echo; info "Обнаружено: $(server_role)"
-        confirm "Настроить защиту fail2detect сейчас?" y && setup_wizard
-    fi
 }
 
 # ---------- аудит безопасности ----------

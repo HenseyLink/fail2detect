@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # fail2detect — защита нод и панели Remnawave от обнаружения и сканеров.
-# Идеи: fail2ban (https://github.com/fail2ban/fail2ban)
-#       remnawave-reverse-proxy от eGames (https://github.com/eGamesAPI/remnawave-reverse-proxy)
 
 set -o pipefail
 # ровные таблицы с кириллицей нужны UTF-8 локали
@@ -11,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave installer setup geocheck speedtest; do
+for _m in common detect firewall jail transport certs web remnawave installer setup ipquality geocheck speedtest; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -34,7 +32,6 @@ ${C_BOLD}Установка Remnawave${C_RESET}
   install panel             панель (+ подписка, + нода на этом же сервере)
   install node [опции]      нода с выбором порта и транспорта
   install sub               страница подписки
-  install egames            установка оригинальным скриптом eGames
 
 ${C_BOLD}Баны и журнал${C_RESET}
   bans                      активные баны
@@ -72,7 +69,8 @@ ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
 
 ${C_BOLD}Сеть${C_RESET}
-  geo [ip]                  GeoCheck: гео-базы и доступность сервисов
+  geo [--full]              GeoCheck: в какой стране IP видят сервисы, CDN и гео-базы (IPv4/IPv6)
+  ipquality [ip]            IPQuality: тип IP, VPN/прокси-флаги, риск, сервисы, почта
   speed [--quick]           Cloudflare Speedtest
   speed --tui               TUI cloudflare-speed-cli
 
@@ -136,7 +134,7 @@ banner() {
  |  _| (_| | | |/ __/ (_| |  __/ ||  __/ (__| |_
  |_|  \__,_|_|_|_____\__,_|\___|\__\___|\___|\__|
 EOF
-    printf '%s  v%s · защита Remnawave · по мотивам fail2ban и eGames%s\n' "$C_GRAY" "$F2D_VERSION" "$C_RESET"
+    printf '%s  v%s · защита нод и панели Remnawave%s\n' "$C_GRAY" "$F2D_VERSION" "$C_RESET"
     local bans=0
     bans=$(awk -F'\t' -v t="$(now)" '$1!="" && ($2==0 || $2>t)' "$F2D_BANS_DB" 2>/dev/null | wc -l)
     local d="${C_RED}остановлен${C_RESET}"; systemctl is-active --quiet fail2detect 2>/dev/null && d="${C_GREEN}работает${C_RESET}"
@@ -258,11 +256,10 @@ menu_install() {
     menu_item 1 "Панель (+ подписка, + нода на этом сервере)"
     menu_item 2 "Нода (порт и транспорт на выбор)"
     menu_item 3 "Страница подписки"
-    menu_item 4 "Через оригинальный скрипт eGames"
     menu_item 0 "Назад"
     ask "Выбор" ""
     case "$REPLY" in
-        1) install_panel;; 2) install_node;; 3) install_sub;; 4) egames_run;;
+        1) install_panel;; 2) install_node;; 3) install_sub;;
         *) return;;
     esac
     pause
@@ -278,9 +275,10 @@ menu_main() {
         menu_item 4 "Фаервол и порты"
         menu_item 5 "Jail'ы (правила банов)"
         menu_item 6 "Нода: транспорт, порт, inbound'ы"
-        menu_item 7 "GeoCheck"
-        menu_item 8 "Cloudflare Speedtest"
-        menu_item 9 "Установка панели / ноды / подписки"
+        menu_item 7 "GeoCheck (регион IP в сервисах)"
+        menu_item 8 "IPQuality (репутация IP)"
+        menu_item 9 "Cloudflare Speedtest"
+        menu_item 10 "Установка панели / ноды / подписки"
         menu_item 0 "Выход"
         ask "Выбор" ""
         case "$REPLY" in
@@ -291,8 +289,9 @@ menu_main() {
             5) menu_jails;;
             6) menu_node;;
             7) geocheck_run; pause;;
-            8) speedtest_run; pause;;
-            9) menu_install;;
+            8) ipquality_run; pause;;
+            9) speedtest_run; pause;;
+            10) menu_install;;
             0|q) exit 0;;
         esac
     done
@@ -310,8 +309,8 @@ main() {
         status)     cmd_status;;
         install)    case "${1:-}" in
                         panel) install_panel;; node) shift; install_node "$@";; sub) install_sub;;
-                        egames) egames_run;; "") require_root; menu_install;;
-                        *) die "install panel|node|sub|egames";;
+                        "") require_root; menu_install;;
+                        *) die "install panel|node|sub";;
                     esac;;
         web)        require_root
                     case "${1:-apply}" in
@@ -364,6 +363,7 @@ main() {
                         *) die "node add|transport|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         geo|geocheck) geocheck_run "${1:-}";;
+        ipquality|ipq) ipquality_run "${1:-}";;
         speed|speedtest)
                     if [[ "${1:-}" == --tui ]]; then speedtest_tui; else speedtest_run "${1:-}"; fi;;
         config)     cmd_config "$@";;

@@ -76,7 +76,7 @@ inb=$(inbound_build xhttp-reality T 443 d.example.com "" "/keep" "PRIV" "SID")
 [[ "$(jq -r '.streamSettings | .xhttpSettings.path + " " + .realitySettings.privateKey + " " + .realitySettings.shortIds[0]' <<<"$inb")" == "/keep PRIV SID" ]] \
     && pass "смена транспорта сохраняет ключи и path" || fail "сохранение ключей и path"
 
-section "docker-compose ноды (в т.ч. от eGames)"
+section "docker-compose ноды (в т.ч. от других установщиков)"
 mkdir -p "$WORK/node"
 printf 'services:\n  remnawave-nginx:\n    image: nginx\n    volumes:\n      - ./a:/a\n\n  remnanode:\n    image: remnawave/node\n    volumes:\n      - /dev/shm:/dev/shm:rw\n' > "$WORK/node/docker-compose.yml"
 node_dir() { echo "$WORK/node"; }
@@ -99,7 +99,7 @@ is_yes yy && is_yes "Да" && is_yes " y" && ! is_yes n && ! is_yes "" && pass "
 
 section "Адрес API панели"
 [[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \
-    && pass "ссылка входа eGames → адрес + cookie" || fail "ссылка входа eGames" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"
+    && pass "ссылка входа → адрес + cookie" || fail "ссылка входа" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"
 [[ "$(rw_parse_url 'https://panel.example.com/')" == $'https://panel.example.com\t' ]] && pass "голый адрес не меняется" || fail "голый адрес"
 [[ "$(rw_parse_url 'http://127.0.0.1:3000')" == $'http://127.0.0.1:3000\t' ]] && pass "локальный API с портом" || fail "локальный API с портом"
 

@@ -169,7 +169,7 @@ profile_config() {   # inbound_json
 # ---------- подготовка ноды под транспорт (выполняется на сервере ноды) ----------
 
 # Добавить в docker-compose ноды монтирование сертификатов (подходит и для
-# compose от eGames). 0 — файл изменён, 1 — уже было.
+# compose сторонних установщиков). 0 — файл изменён, 1 — уже было.
 node_compose_add_certs() {
     local f; f="$(node_dir)/docker-compose.yml"
     [[ -f "$f" ]] || return 1

@@ -181,8 +181,8 @@ EOF
 web_apply() {
     require_docker
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
-        err "На сервере работает nginx от eGames (remnawave-nginx) — он уже владеет $NGINX_SOCK."
-        err "Второй nginx не ставлю: сайты/панель здесь настраиваются скриптом eGames."
+        err "На сервере уже работает другой nginx (remnawave-nginx) — он владеет $NGINX_SOCK."
+        err "Второй nginx не ставлю: сайты и панель здесь настраивает тот установщик."
         return 1
     fi
     web_load

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — работа с Remnawave: API, смена порта/транспорта ноды, логи Xray.
 #
-# Почему нода от eGames «не встаёт» на 8443: установщик жёстко прописывает 443
+# Почему нода от популярных установщиков «не встаёт» на 8443: они жёстко прописывают 443
 # в трёх местах — правило UFW, inbound в профиле конфигурации и порт хоста
 # (то, что уходит клиентам в подписку), а в конце проверяет ноду запросом
 # на https://домен (то есть на 443). Если поменять порт только в одном месте,
@@ -10,7 +10,7 @@
 
 RW_TOKEN_FILE="${F2D_CONF_DIR}/api_token"
 
-# В RW_API_URL часто вставляют ссылку входа eGames целиком:
+# В RW_API_URL часто вставляют ссылку входа в панель целиком:
 #   https://panel.example.com/auth/login?abcd=EFGH
 # Нужен только адрес (https://panel.example.com), а ?abcd=EFGH — это cookie.
 # Печатает "url<TAB>cookie" (cookie пустой, если его в ссылке не было).
@@ -36,7 +36,7 @@ rw_token() {
     [[ -n "${_RW_TOKEN:-}" ]] && { echo "$_RW_TOKEN"; return; }
     local t="$RW_API_TOKEN"
     [[ -z "$t" && -s "$RW_TOKEN_FILE" ]] && t=$(<"$RW_TOKEN_FILE")
-    [[ -z "$t" && -s "$EGAMES_DIR/token" ]] && t=$(<"$EGAMES_DIR/token")
+    [[ -z "$t" && -s "$RP_DIR/token" ]] && t=$(<"$RP_DIR/token")
     # без терминала (или в doctor) не спрашиваем — иначе «зависание» на скрытом вопросе
     if [[ -z "$t" && ( -n "${F2D_NO_PROMPT:-}" || ! -t 0 ) ]]; then return 1; fi
     if [[ -z "$t" ]]; then
@@ -75,7 +75,7 @@ rw_probe() {
         "${RW_API_URL%/}/api/config-profiles" -H @<(printf '%s' "$hdr") </dev/null 2>/dev/null) || rc=$?
     if [[ -z "$code" || "$code" == 000 ]]; then
         case "$rc" in
-            52|56) code=444;;   # соединение закрыто без ответа — так nginx eGames отвечает без ключа
+            52|56) code=444;;   # соединение закрыто без ответа — так nginx панели отвечает без ключа входа
             6) code=dns;; 28) code=timeout;; *) code=000;;
         esac
     fi
@@ -92,7 +92,7 @@ rw_probe_explain() {   # код -> человеческое объяснение
         dns) echo "домен из $RW_API_URL не резолвится — проверьте адрес";;
         timeout) echo "панель не ответила за 15 с — фаервол панели или неверный адрес";;
         401|403) echo "панель отвергла токен (HTTP $1) — проверьте API-токен";;
-        444|400|"") echo "nginx панели закрыл соединение — нужен ключ eGames (ссылка входа целиком)";;
+        444|400|"") echo "nginx панели закрыл соединение — нужен ключ входа (вставьте ссылку входа целиком)";;
         404) echo "по этому адресу нет API Remnawave (HTTP 404) — нужен адрес панели";;
         5*) echo "панель ответила ошибкой HTTP $1";;
         *) echo "неожиданный ответ HTTP $1";;
@@ -110,12 +110,12 @@ rw_setup_interactive() {
     else
         local cur=""; [[ "$RW_API_URL" != http://127.0.0.1:3000 ]] && cur="$RW_API_URL"
         echo "  Вставьте адрес панели (https://panel.example.com) или, если панель ставил"
-        echo "  скрипт eGames, ссылку входа ЦЕЛИКОМ — с ?ключом=значением на конце."
+        echo "  установщик с секретным ключом, ссылку входа ЦЕЛИКОМ — с ?ключом=значением на конце."
         ask "Панель (пусто — пропустить)" "$cur"
         [[ -z "$REPLY" ]] && { info "Пропущено. Позже: fail2detect config RW_API_URL <ссылка>"; return 0; }
         [[ "$REPLY" =~ ^https?:// ]] || REPLY="https://$REPLY"
         config_set RW_API_URL "$REPLY"; rw_normalize_url
-        [[ -n "${RW_API_COOKIE:-}" ]] && ok "Ключ входа eGames сохранён (RW_API_COOKIE)"
+        [[ -n "${RW_API_COOKIE:-}" ]] && ok "Ключ входа сохранён (RW_API_COOKIE)"
     fi
     local try code n need_token=no
     F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1 || need_token=yes
@@ -136,7 +136,7 @@ rw_setup_interactive() {
         warn "$(rw_probe_explain "$code")"
         [[ "$code" =~ ^(401|403|notoken)$ ]] && need_token=yes || need_token=no
         if [[ "$code" =~ ^(444|400)$ && -z "${RW_API_COOKIE:-}" ]] && ! has_panel; then
-            ask "Ключ eGames name=value (или ссылка входа целиком; пусто — нет ключа)" ""
+            ask "Ключ входа name=value (или ссылка входа целиком; пусто — нет ключа)" ""
             if [[ "$REPLY" == http* ]]; then config_set RW_API_URL "$REPLY"; rw_normalize_url
             elif [[ -n "$REPLY" ]]; then config_set RW_API_COOKIE "$REPLY"; fi
         fi
@@ -153,11 +153,11 @@ rw_api_ok() {   # проверка доступа к API
 rw_need_api() {
     if [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; then
         warn "Панели на этом сервере нет."
-        ask "Адрес панели или ссылка входа eGames целиком" ""
+        ask "Адрес панели или ссылка входа целиком" ""
         [[ -n "$REPLY" ]] || return 1
         config_set RW_API_URL "$REPLY"; rw_normalize_url
         if [[ -z "${RW_API_COOKIE:-}" ]]; then
-            info "Если панель закрыта ключом eGames, укажите его: name=value из ссылки входа"
+            info "Если панель закрыта ключом входа, укажите его: name=value из ссылки входа"
             ask "Cookie (пусто — пропустить)" ""
             [[ -n "$REPLY" ]] && config_set RW_API_COOKIE "$REPLY"
         fi
@@ -257,7 +257,7 @@ node_port_change() {   # new_port [tag]
 # ---------- смена транспорта (и порта) у работающей ноды ----------
 # Inbound пересобирается с тем же tag: ключи Reality и path сохраняются, где
 # это возможно; хосты, ноды и squad'ы перепривязываются, если панель выдала
-# inbound'у новый uuid. Подходит для нод от eGames, fail2detect и ручных.
+# inbound'у новый uuid. Подходит для нод от любых установщиков и ручных.
 node_transport_change() {   # [tag]
     require_root; rw_need_api || return 1
     rw_pick_inbound "${1:-}" "Номер inbound'а, у которого меняем транспорт"
@@ -296,7 +296,7 @@ node_transport_change() {   # [tag]
         [[ -n "$T_DOMAIN" ]] && printf ' --domain %s' "$T_DOMAIN"
         [[ -n "$T_TARGET" ]] && printf ' --target %s' "$T_TARGET"
         printf ' --close %s/%s\n' "$oport" "$ol4"
-        echo "    (для нод от eGames тоже подходит — сначала установите fail2detect на ноду)"
+        echo "    (подходит для нод от любого установщика — сначала установите fail2detect на ноду)"
         confirm "Нода подготовлена?" n || { info "Отменено, панель не изменена"; return 1; }
     fi
 

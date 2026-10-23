@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# fail2detect — автоопределение окружения (Remnawave, скрипт eGames, порты).
+# fail2detect — автоопределение окружения (Remnawave, порты, панель).
 
 compose_has_service() { [[ -f "$1/docker-compose.yml" ]] && grep -qE "^[[:space:]]*$2:" "$1/docker-compose.yml"; }
 
 has_panel()  { compose_has_service "$RW_PANEL_DIR" remnawave; }
 has_node()   { compose_has_service "$RW_NODE_DIR" remnanode || compose_has_service "$RW_PANEL_DIR" remnanode; }
-has_egames() { [[ -d "$EGAMES_DIR" || -x "$EGAMES_BIN" ]]; }
 has_sub_page() { [[ -f /opt/subscription/docker-compose.yml ]] || compose_has_service "$RW_PANEL_DIR" remnawave-subscription-page; }
 
 # каталог, где лежит compose с remnanode
@@ -50,7 +49,7 @@ detect_xray_udp_ports() {
     ss -H -ulnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
 }
 
-# IP панели: из конфига, иначе из правил UFW для порта ноды (так делает eGames)
+# IP панели: из конфига, иначе из правил UFW для порта ноды (так их задают установщики)
 detect_panel_ips() {
     [[ -n "$PANEL_IPS" ]] && { echo "$PANEL_IPS"; return; }
     local port; port=$(detect_node_api_port) || return 0
@@ -83,7 +82,6 @@ wan_iface() { ip -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if 
 print_env_summary() {
     title "Окружение"
     printf '  %-22s %s\n' "Роль сервера:" "$(server_role)"
-    printf '  %-22s %s\n' "Скрипт eGames:" "$(has_egames && echo "установлен ($EGAMES_DIR)" || echo "нет")"
     printf '  %-22s %s\n' "Режим фаервола:" "$(fw_mode)$(ufw_active && echo ' (UFW активен)')"
     printf '  %-22s %s\n' "SSH-порты:" "$(detect_ssh_ports)"
     has_node && printf '  %-22s %s\n' "Порты Xray:" "$(detect_xray_ports || true)"

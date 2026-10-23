@@ -5,9 +5,9 @@
 Проект объединяет две идеи:
 
 - **[fail2ban](https://github.com/fail2ban/fail2ban)**: читать логи, считать неудачные попытки с одного IP и банить его;
-- **[remnawave-reverse-proxy от eGames](https://github.com/eGamesAPI/remnawave-reverse-proxy)**: популярный установщик панели, нод и страницы подписки. fail2detect с ним совместим: защищает ноды, поставленные eGames, умеет менять у них порт и транспорт и может запустить сам скрипт eGames.
+- **[remnawave-reverse-proxy от eGames](https://github.com/eGamesAPI/remnawave-reverse-proxy)**: популярный установщик панели, нод и страницы подписки. Его идеи вдохновили установщик fail2detect.
 
-Главная задача fail2detect — защита уже работающих нод и панелей. Кроме того, в нём есть собственный установщик. Он не копирует скрипт eGames: файлы панели и страницы подписки берутся из официальных репозиториев Remnawave. В отличие от eGames, порт ноды и транспорт можно выбрать.
+Главная задача fail2detect — защита уже работающих нод и панелей. Кроме того, в нём есть собственный установщик: файлы панели и страницы подписки берутся из официальных репозиториев Remnawave, а порт ноды и транспорт можно выбрать. fail2detect работает и на серверах, поставленных другими установщиками: защищает их ноды и умеет менять у них порт и транспорт.
 
 ## Установка
 
@@ -17,7 +17,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/
 
 Скрипт ставит зависимости (`nftables curl jq`), копирует файлы в `/opt/fail2detect` и создаёт команду `fail2detect`. Затем он предлагает запустить мастер настройки.
 
-Первым шагом мастер подключает панель Remnawave. Он спрашивает адрес панели (если панель ставил eGames — ссылку входа целиком, ключ из неё fail2detect возьмёт сам) и API-токен (Панель → Настройки → API токены). Подключение сразу проверяется, а при ошибке мастер говорит, что не так: токен, ключ eGames, адрес или фаервол.
+Первым шагом мастер подключает панель Remnawave. Он спрашивает адрес панели (если панель закрыта секретным ключом входа — ссылку входа целиком, ключ из неё fail2detect возьмёт сам) и API-токен (Панель → Настройки → API токены). Подключение сразу проверяется, а при ошибке мастер говорит, что не так: токен, ключ входа, адрес или фаервол.
 
 Если запустить `fail2detect` без аргументов, откроется интерактивное меню.
 
@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/
 
 ### 1. Фаервол и порты
 
-Правила лежат в отдельной таблице nftables `inet fail2detect`. Она обрабатывает пакеты раньше UFW и Docker и может их только запрещать. Если пакет разрешён в таблице fail2detect, его дальше проверяют правила UFW, поэтому то, что настроил eGames, продолжает работать.
+Правила лежат в отдельной таблице nftables `inet fail2detect`. Она обрабатывает пакеты раньше UFW и Docker и может их только запрещать. Если пакет разрешён в таблице fail2detect, его дальше проверяют правила UFW, поэтому то, что уже настроено в UFW, продолжает работать.
 
 | Защита | Зачем |
 |---|---|
@@ -39,7 +39,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/
 | Безопасное применение | Если не подтвердить, что SSH работает, через 60 с правила откатываются |
 
 Режимы работы:
-- `ufw` (сервер настроен eGames): списком открытых портов управляет UFW, а fail2detect добавляет поверх баны и защиту;
+- `ufw` (на сервере уже настроен UFW): списком открытых портов управляет UFW, а fail2detect добавляет поверх баны и защиту;
 - `nft` (UFW нет): fail2detect сам закрывает всё, кроме SSH, Xray и явно открытых портов.
 
 ### 2. Баны по принципу fail2ban
@@ -49,7 +49,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/
 | `sshd` | journald | перебор паролей, SSH-сканеры | вкл, 5 за 10 мин → 1 ч |
 | `portscan` | журнал ядра | стук в закрытые порты и в API ноды | вкл, 3 за 10 мин → 1 сутки |
 | `flood` | журнал ядра | записывает баны анти-флуда | вкл |
-| `panel` | `docker logs remnawave-nginx` | запросы к панели без секретного ключа eGames (ответ 444) | вкл на сервере с одной панелью |
+| `panel` | `docker logs remnawave-nginx` | запросы к панели без секретного ключа входа (ответ 444) | вкл на сервере с одной панелью |
 | `reality` | лог Xray | невалидные Reality-подключения (активное зондирование) | выкл, включается `fail2detect node logs` |
 
 Повторный бан того же IP длится вдвое дольше, максимум 30 дней. Баны переживают перезагрузку. Никогда не банятся частные сети, IP панели, белый список и адрес вашей текущей SSH-сессии.
@@ -78,7 +78,6 @@ fail2detect install panel     # панель (+ страница подписк�
 fail2detect node add          # на сервере панели: профиль + нода + хост + squad, выдаёт команду для ноды
 fail2detect install node      # на сервере ноды (или готовая команда из `node add`)
 fail2detect install sub       # страница подписки (на сервере панели или отдельно)
-fail2detect install egames    # оригинальный скрипт eGames
 ```
 
 | Транспорт | Что это | Что нужно на ноде |
@@ -113,15 +112,15 @@ fail2detect node inbounds           # посмотреть inbound'ы, порт�
 
 Если нода на другом сервере, fail2detect покажет команду `fail2detect node prepare …` для неё и подождёт подтверждения. Только после этого он изменит панель.
 
-**Нода от eGames.** Установите на неё fail2detect и выполните `node transport` (или `node prepare` на ноде и `node transport` на панели). fail2detect не трогает nginx eGames: Reality продолжает работать через его сокет, а для TLS-транспортов берётся сертификат, который eGames уже выпустил.
+**Нода от другого установщика.** Установите на неё fail2detect и выполните `node transport` (или `node prepare` на ноде и `node transport` на панели). fail2detect не трогает уже работающий nginx: Reality продолжает работать через его сокет, а для TLS-транспортов берётся сертификат, уже выпущенный для домена.
 
-**Почему eGames не ставит ноду на 8443.** Его установщик жёстко прописывает 443 в нескольких местах:
+**Почему популярные установщики не ставят ноду на 8443.** Они жёстко прописывают 443 в нескольких местах:
 - правило UFW `allow 443/tcp`;
 - inbound в профиле конфигурации (`port: 443`);
 - хост (порт, который уходит клиентам в подписку);
 - финальная проверка `curl https://домен` (по умолчанию на 443).
 
-Если ставить на 8443, проверка падает, и установщик сообщает, что нода не подключилась. Есть два выхода: поставить ноду через eGames на 443 и затем выполнить `fail2detect node port 8443`, либо сразу ставить через `fail2detect install node`.
+Если ставить на 8443, проверка падает, и установщик сообщает, что нода не подключилась. Есть два выхода: поставить ноду на 443 и затем выполнить `fail2detect node port 8443`, либо сразу ставить через `fail2detect install node`.
 
 **Вручную, без скриптов.** Порядок такой:
 1. На ноде: если меняется протокол, откройте новый порт в UFW (`ufw allow 8443/tcp`, для Hysteria — `/udp`).
@@ -132,31 +131,40 @@ fail2detect node inbounds           # посмотреть inbound'ы, порт�
 
 API-токен берётся в таком порядке:
 - после `install panel` — токен fail2detect;
-- иначе — токен скрипта eGames (`/usr/local/remnawave_reverse/token`);
+- иначе — токен, сохранённый установщиком (`/usr/local/remnawave_reverse/token`);
 - если нет ни того, ни другого, fail2detect спросит токен один раз.
 
 Если панель на другом сервере, укажите `RW_API_URL` и, если панель закрыта cookie-ключом, `RW_API_COOKIE`.
 
 После смены порта или транспорта клиентам нужно обновить подписку.
 
-### 6. GeoCheck и Cloudflare Speedtest
+### 6. GeoCheck, IPQuality и Cloudflare Speedtest
 
 ```bash
-fail2detect geo          # отчёт о качестве IP этого сервера
-fail2detect geo 1.2.3.4  # отчёт по другому IP (разделы 1–4)
-fail2detect speed        # задержка, джиттер, скачивание/загрузка через speed.cloudflare.com
-fail2detect speed --tui  # полноэкранный cloudflare-speed-cli (kavehtehrani), ставится по запросу
+fail2detect geo               # GeoCheck: в какой стране IP видят сервисы, CDN и гео-базы
+fail2detect geo --full        # то же без маскировки IP (по умолчанию 78.135.*.*)
+fail2detect ipquality         # IPQuality: репутация IP этого сервера
+fail2detect ipquality 1.2.3.4 # IPQuality по другому IP (разделы 1–4)
+fail2detect speed             # задержка, джиттер, скачивание/загрузка через speed.cloudflare.com
+fail2detect speed --tui       # полноэкранный cloudflare-speed-cli (kavehtehrani), ставится по запросу
 ```
 
-Структура отчёта GeoCheck повторяет [IPQuality](https://github.com/xykt/IPQuality), но код свой. Опрашиваются только открытые источники без ключей: IPinfo, ipregistry, ip-api, proxycheck.io, Scamalytics, IP2Location и DB-IP. Разделы отчёта:
+**GeoCheck** спрашивает у самих сервисов, в какой стране они видят этот IP, отдельно по IPv4 и IPv6. Каждый сервис пользуется своей базой, поэтому ответы расходятся, и ради этого отчёт и нужен. Проверяются три группы:
+- **популярные сервисы** (21): Google, YouTube, Twitch, ChatGPT, Netflix, Spotify, Reddit, Disney+, доступность Gemini, YouTube Premium, капча Google, Apple, Steam, TikTok, Ookla, JetBrains, PlayStation, Microsoft и другие;
+- **CDN**: ближайшие узлы Cloudflare, YouTube и Netflix;
+- **гео-базы** (17): MaxMind, RIPE, ipinfo, ipregistry, ip2location и другие.
+
+В конце отчёта перечислено, кто видит не ту страну. Способы определения регионов взяты из [ipregion](https://github.com/vernette/ipregion) (MIT), код свой.
+
+**IPQuality** — отчёт о репутации IP. Его структура повторяет [IPQuality](https://github.com/xykt/IPQuality), но код свой. Опрашиваются только открытые источники без ключей: IPinfo, ipregistry, ip-api, proxycheck.io, Scamalytics, IP2Location и DB-IP. Разделы отчёта:
 1. **Основное:** ASN, организация, rDNS, подсеть, координаты, фактический регион и регион регистрации, тип IP (нативный или вещательный).
 2. **Тип IP:** провайдер, хостинг, мобильный или VPN — по мнению каждой базы.
 3. **Оценка риска:** шкалы proxycheck и Scamalytics.
 4. **Факторы риска:** таблица «база × прокси / Tor / VPN / сервер / абьюзер / бот».
-5. **Сервисы:** TikTok, Netflix, YouTube Premium, Prime Video, Reddit, ChatGPT, Claude, Gemini — доступность и регион.
+5. **Сервисы:** доступность TikTok, Netflix, YouTube Premium, Prime Video, Reddit, ChatGPT, Claude, Gemini.
 6. **Почта:** исходящий порт 25, подключение к почтовым сервисам, около 20 чёрных списков (DNSBL).
 
-Для ноды VPN самые важные разделы 2–4: по ним сервисы отличают VPN-сервер от обычного абонента. В конце отчёта перечислено, какие базы уже пометили IP как VPN или прокси.
+Для ноды VPN самые важные разделы 2–4: по ним сервисы отличают VPN-сервер от обычного абонента.
 
 ### 7. Аудит безопасности
 
@@ -189,7 +197,7 @@ fail2detect speed --tui  # полноэкранный cloudflare-speed-cli (kave
 /var/log/fail2detect/audit.log    журнал аудита
 /etc/fail2detect/web.env          домены и ключ панели для nginx
 /opt/fail2detect-web/             nginx (панель, подписка, selfsteal)
-/opt/remnawave/  /opt/remnanode/  /opt/subscription/   Remnawave (те же пути, что у eGames)
+/opt/remnawave/  /opt/remnanode/  /opt/subscription/   Remnawave (стандартные пути)
 ```
 
 Службы: `fail2detect.service` (фаервол + демон банов) и `fail2detect-blocklist.timer` (ежедневное обновление блок-листов).
@@ -201,9 +209,11 @@ fail2detect speed --tui  # полноэкранный cloudflare-speed-cli (kave
 ## Благодарности
 
 - [fail2ban](https://github.com/fail2ban/fail2ban) — идея и модель jail'ов
-- [eGamesAPI/remnawave-reverse-proxy](https://github.com/eGamesAPI/remnawave-reverse-proxy) — установка Remnawave
+- [eGamesAPI/remnawave-reverse-proxy](https://github.com/eGamesAPI/remnawave-reverse-proxy) — вдохновение для установщика
 - [shadow-netlab/traffic-guard-lists](https://github.com/shadow-netlab/traffic-guard-lists), [tread-lightly/CyberOK_Skipa_ips](https://github.com/tread-lightly/CyberOK_Skipa_ips) — списки сканеров
 - [Remnawave](https://github.com/remnawave) — официальные compose-файлы для установки
+- [vernette/ipregion](https://github.com/vernette/ipregion) — способы определения регионов для GeoCheck
+- [xykt/IPQuality](https://github.com/xykt/IPQuality) — структура отчёта IPQuality
 - [kavehtehrani/cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli) — вдохновение для speedtest
 
 ## Тесты
