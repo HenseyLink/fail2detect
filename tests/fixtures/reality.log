@@ -1,0 +1,3 @@
+2026/10/16 10:00:00.123 [Info] REALITY: processed invalid connection from 95.1.2.3:51000: client using X25519
+2026/10/16 10:00:00.124 [Info] REALITY: processed invalid connection from [2a00:1::5]:51000: bad
+2026/10/16 10:00:00.125 [Info] [123] proxy/vless/inbound: firstLen = 517

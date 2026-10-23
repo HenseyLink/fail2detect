@@ -1,0 +1,2 @@
+f2d-flood: IN=eth0 OUT= SRC=45.1.2.5 DST=1.1.1.1 PROTO=TCP DPT=443
+f2d-drop: IN=eth0 OUT= SRC=45.1.2.6 DST=1.1.1.1 PROTO=TCP DPT=22

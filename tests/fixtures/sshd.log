@@ -1,0 +1,10 @@
+Failed password for root from 203.0.113.5 port 51234 ssh2
+Failed password for invalid user admin from 203.0.113.6 port 4444 ssh2
+Failed publickey for git from 2001:db8::7 port 22 ssh2
+Invalid user test from 198.51.100.8 port 22
+Connection closed by authenticating user root 198.51.100.9 port 33333 [preauth]
+Disconnected from invalid user oracle 198.51.100.12 port 40000 [preauth]
+banner exchange: Connection from 198.51.100.10 port 5555: invalid format
+Unable to negotiate with 198.51.100.11 port 1234: no matching key exchange method found.
+Accepted publickey for root from 192.0.2.50 port 5000 ssh2
+Server listening on 0.0.0.0 port 22.

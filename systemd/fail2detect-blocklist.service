@@ -1,0 +1,9 @@
+[Unit]
+Description=fail2detect — обновление блок-листов сканеров
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=NO_COLOR=1
+ExecStart=/usr/local/bin/fail2detect blocklist update

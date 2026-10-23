@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# fail2detect — защита нод и панели Remnawave от обнаружения и сканеров.
+# Идеи: fail2ban (https://github.com/fail2ban/fail2ban)
+#       remnawave-reverse-proxy от eGames (https://github.com/eGamesAPI/remnawave-reverse-proxy)
+
+set -o pipefail
+# ровные таблицы с кириллицей нужны UTF-8 локали
+[[ "$(locale charmap 2>/dev/null)" == UTF-8 ]] || export LC_ALL=C.UTF-8
+
+F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
+F2D_SHARE="$F2D_HOME"
+
+for _m in common detect firewall jail transport certs web remnawave installer setup geocheck speedtest; do
+    # shellcheck disable=SC1090
+    source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
+done
+unset _m
+
+load_config
+
+usage() {
+    cat <<EOF
+${C_BOLD}fail2detect $F2D_VERSION${C_RESET} — защита нод и панели Remnawave
+
+${C_BOLD}Использование:${C_RESET} fail2detect [команда]   (без команды — интерактивное меню)
+
+${C_BOLD}Настройка${C_RESET}
+  setup                     мастер настройки защиты
+  doctor                    аудит безопасности сервера
+  status                    сводка: фаервол, jail'ы, баны
+
+${C_BOLD}Установка Remnawave${C_RESET}
+  install panel             панель (+ подписка, + нода на этом же сервере)
+  install node [опции]      нода с выбором порта и транспорта
+  install sub               страница подписки
+  install egames            установка оригинальным скриптом eGames
+
+${C_BOLD}Баны и журнал${C_RESET}
+  bans                      активные баны
+  ban <ip> [срок]           забанить вручную (1h, 7d, 0 = навсегда)
+  unban <ip>                разбанить
+  log [-n N] [--ip IP] [--jail J] [--action BAN|UNBAN] [--today]
+  stats                     статистика банов
+  trust add|del|list [ip]   белый список
+
+${C_BOLD}Фаервол${C_RESET}
+  fw apply|status|disable|rollback|show
+  port open|close <порт> [tcp|udp]
+  blocklist update          обновить блок-листы сканеров
+
+${C_BOLD}Jail'ы${C_RESET}
+  jail status
+  jail enable|disable <имя>
+  jail test <имя> [файл|строка]   проверить регулярки на логах
+
+${C_BOLD}Нода Remnawave${C_RESET}
+  node add                  создать ноду в панели (профиль + хост + squad), выдаст команду для ноды
+  node transport [tag]      сменить транспорт и/или порт у работающей ноды
+  node port <порт> [tag]    только перенести Xray-inbound на другой порт
+  node prepare --transport T --port P [--domain D] [--target host:port] [--close P/proto]
+                            подготовить сервер ноды к транспорту (сертификат, сайт, фаервол)
+  node inbound-json <транспорт> <порт> [домен] [target]
+                            JSON inbound'а для ручной вставки в профиль
+  node api-port <порт>      сменить NODE_PORT (API ноды, по умолчанию 2222)
+  node inbounds             список inbound'ов и портов
+  node logs                 включить лог Xray для jail reality
+
+  Транспорты: tcp-reality, xhttp-reality, xhttp-tls, grpc-reality, grpc-tls, hysteria2
+
+${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
+  web apply | show | url    применить / показать конфиг / ссылка входа в панель
+
+${C_BOLD}Сеть${C_RESET}
+  geo [ip]                  GeoCheck: гео-базы и доступность сервисов
+  speed [--quick]           Cloudflare Speedtest
+  speed --tui               TUI cloudflare-speed-cli
+
+${C_BOLD}Прочее${C_RESET}
+  config <KEY> [VALUE]      показать/изменить параметр
+  update                    обновить fail2detect
+  uninstall                 удалить fail2detect
+  version
+EOF
+}
+
+cmd_status() {
+    print_env_summary
+    fw_status
+    jail_status
+}
+
+cmd_config() {
+    if [[ -z "${1:-}" ]]; then
+        title "Конфигурация ($F2D_CONF)"
+        grep -vE '^\s*(#|$)' "$F2D_CONF" 2>/dev/null | sed -E 's/^(RW_API_TOKEN|TG_BOT_TOKEN|RW_API_COOKIE)=.*/\1="***"/'
+        return
+    fi
+    if [[ $# -eq 1 ]]; then echo "${!1:-}"; return; fi
+    require_root
+    config_set "$1" "$2"
+    ok "$1=$2"
+    case "$1" in
+        FW_MODE|SSH_PORTS|PUBLIC_*|XRAY_PORTS|NODE_API_PORT|PANEL_IPS|TRUSTED_IPS|STEALTH_ICMP|DOCKER_GUARD|FLOOD_*) fw_apply;;
+    esac
+}
+
+cmd_update() {
+    require_root
+    info "Обновляю fail2detect…"
+    curl -fsSL "https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh" | bash -s -- --update
+}
+
+cmd_uninstall() {
+    require_root
+    confirm "Удалить fail2detect? Баны будут сняты, UFW останется как есть" n || return 0
+    systemctl disable --now fail2detect.service fail2detect-blocklist.timer >/dev/null 2>&1
+    rm -f /etc/systemd/system/fail2detect.service /etc/systemd/system/fail2detect-blocklist.{service,timer}
+    systemctl daemon-reload
+    fw_disable
+    rm -f /usr/local/bin/fail2detect
+    confirm "Удалить конфиги и журнал аудита ($F2D_CONF_DIR, $F2D_LOG_DIR)?" n && rm -rf "$F2D_CONF_DIR" "$F2D_LOG_DIR" "$F2D_STATE_DIR"
+    rm -rf "$F2D_SHARE"
+    ok "fail2detect удалён"
+}
+
+# ---------- меню ----------
+banner() {
+    clear 2>/dev/null
+    printf '%s' "$C_MAGENTA"
+    cat <<'EOF'
+   __       _ _ ____     _      _            _
+  / _| __ _(_) |___ \ __| | ___| |_ ___  ___| |_
+ | |_ / _` | | | __) / _` |/ _ \ __/ _ \/ __| __|
+ |  _| (_| | | |/ __/ (_| |  __/ ||  __/ (__| |_
+ |_|  \__,_|_|_|_____\__,_|\___|\__\___|\___|\__|
+EOF
+    printf '%s  v%s · защита Remnawave · по мотивам fail2ban и eGames%s\n' "$C_GRAY" "$F2D_VERSION" "$C_RESET"
+    local bans=0
+    bans=$(awk -F'\t' -v t="$(now)" '$1!="" && ($2==0 || $2>t)' "$F2D_BANS_DB" 2>/dev/null | wc -l)
+    local d="${C_RED}остановлен${C_RESET}"; systemctl is-active --quiet fail2detect 2>/dev/null && d="${C_GREEN}работает${C_RESET}"
+    printf '  Роль: %s%s%s · Демон: %s · Баны: %s%s%s\n' "$C_WHITE" "$(server_role)" "$C_RESET" "$d" "$C_RED" "$bans" "$C_RESET"
+    hr 62
+}
+
+menu_item() { printf '  %s%2s.%s %s\n' "$C_YELLOW" "$1" "$C_RESET" "$2"; }
+
+menu_bans() {
+    while true; do
+        banner
+        echo "  ${C_BOLD}Баны и журнал аудита${C_RESET}"
+        menu_item 1 "Активные баны"
+        menu_item 2 "Журнал аудита (последние 50)"
+        menu_item 3 "Найти IP в журнале"
+        menu_item 4 "Разбанить IP"
+        menu_item 5 "Забанить IP вручную"
+        menu_item 6 "Белый список"
+        menu_item 7 "Статистика"
+        menu_item 0 "Назад"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) ban_list;;
+            2) audit_show -n 50;;
+            3) ask "IP"; audit_show -n 200 --ip "$REPLY";;
+            4) ask "IP для разбана"; is_ip "$REPLY" && ban_remove "$REPLY" && \
+                 confirm "Добавить $REPLY в белый список, чтобы не банился снова?" n && trust_add "$REPLY";;
+            5) ask "IP"; local ip="$REPLY"; ask "Срок (1h, 1d, 0 = навсегда)" "1d"; ban_add "$ip" "$(to_seconds "$REPLY")" manual "вручную";;
+            6) echo "  Сейчас: ${TRUSTED_IPS:-пусто}"
+               ask "add <ip> / del <ip> / пусто — назад"; read -r -a _a <<<"$REPLY"; set -- "${_a[@]}"
+               case "${1:-}" in add) trust_add "$2";; del) trust_del "$2";; esac;;
+            7) audit_stats;;
+            0|q|"") return;;
+        esac
+        pause
+    done
+}
+
+menu_fw() {
+    while true; do
+        banner
+        echo "  ${C_BOLD}Фаервол и порты${C_RESET}"
+        menu_item 1 "Статус фаервола"
+        menu_item 2 "Применить правила (с защитой от потери SSH)"
+        menu_item 3 "Открыть порт"
+        menu_item 4 "Закрыть порт"
+        menu_item 5 "Обновить блок-листы сканеров"
+        menu_item 6 "Скрытие от ping: $STEALTH_ICMP"
+        menu_item 7 "Анти-флуд: $FLOOD_GUARD"
+        menu_item 8 "Показать правила nftables"
+        menu_item 0 "Назад"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) fw_status;;
+            2) fw_apply --safe;;
+            3) ask "Порт"; local p="$REPLY"; ask "Протокол" "tcp"; fw_port_open "$p" "$REPLY";;
+            4) ask "Порт"; local p="$REPLY"; ask "Протокол" "tcp"; fw_port_close "$p" "$REPLY";;
+            5) blocklist_update;;
+            6) config_set STEALTH_ICMP "$([[ $STEALTH_ICMP == yes ]] && echo no || echo yes)"; fw_apply;;
+            7) config_set FLOOD_GUARD "$([[ $FLOOD_GUARD == yes ]] && echo no || echo yes)"; fw_apply;;
+            8) nft list table inet "$F2D_NFT_TABLE" | ${PAGER:-less};;
+            0|q|"") return;;
+        esac
+        pause
+    done
+}
+
+menu_jails() {
+    while true; do
+        banner
+        jail_status
+        echo
+        menu_item 1 "Включить jail"
+        menu_item 2 "Выключить jail"
+        menu_item 3 "Проверить регулярки jail на логах"
+        menu_item 4 "Перезапустить демон"
+        menu_item 0 "Назад"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) ask "Имя"; jail_set_enabled "$REPLY" yes;;
+            2) ask "Имя"; jail_set_enabled "$REPLY" no;;
+            3) ask "Имя"; jail_test "$REPLY";;
+            4) systemctl restart fail2detect && ok "Перезапущен";;
+            0|q|"") return;;
+        esac
+        pause
+    done
+}
+
+menu_node() {
+    while true; do
+        banner
+        echo "  ${C_BOLD}Нода Remnawave${C_RESET}"
+        menu_item 1 "Inbound'ы и порты"
+        menu_item 2 "Сменить транспорт и порт (TCP/XHTTP/gRPC/Hysteria 2)"
+        menu_item 3 "Только перенести порт (вместо 443)"
+        menu_item 4 "Добавить ноду в панель"
+        menu_item 5 "Сменить API-порт ноды (NODE_PORT)"
+        menu_item 6 "Включить лог Xray (jail reality)"
+        menu_item 0 "Назад"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) rw_show_inbounds;;
+            2) node_transport_change;;
+            3) ask "Новый порт" "8443"; node_port_change "$REPLY";;
+            4) node_add;;
+            5) ask "Новый NODE_PORT"; node_api_port_change "$REPLY";;
+            6) node_logs_enable;;
+            0|q|"") return;;
+        esac
+        pause
+    done
+}
+
+menu_install() {
+    banner
+    echo "  ${C_BOLD}Установка${C_RESET}"
+    menu_item 1 "Панель (+ подписка, + нода на этом сервере)"
+    menu_item 2 "Нода (порт и транспорт на выбор)"
+    menu_item 3 "Страница подписки"
+    menu_item 4 "Через оригинальный скрипт eGames"
+    menu_item 0 "Назад"
+    ask "Выбор" ""
+    case "$REPLY" in
+        1) install_panel;; 2) install_node;; 3) install_sub;; 4) egames_run;;
+        *) return;;
+    esac
+    pause
+}
+
+menu_main() {
+    require_root
+    while true; do
+        banner
+        menu_item 1 "Мастер настройки защиты"
+        menu_item 2 "Аудит безопасности (doctor)"
+        menu_item 3 "Баны и журнал аудита"
+        menu_item 4 "Фаервол и порты"
+        menu_item 5 "Jail'ы (правила банов)"
+        menu_item 6 "Нода: транспорт, порт, inbound'ы"
+        menu_item 7 "GeoCheck"
+        menu_item 8 "Cloudflare Speedtest"
+        menu_item 9 "Установка панели / ноды / подписки"
+        menu_item 0 "Выход"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) setup_wizard; pause;;
+            2) doctor; pause;;
+            3) menu_bans;;
+            4) menu_fw;;
+            5) menu_jails;;
+            6) menu_node;;
+            7) geocheck_run; pause;;
+            8) speedtest_run; pause;;
+            9) menu_install;;
+            0|q) exit 0;;
+        esac
+    done
+}
+
+# ---------- CLI ----------
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        "")         menu_main;;
+        -h|--help|help) usage;;
+        version|-v|--version) echo "fail2detect $F2D_VERSION";;
+        setup)      setup_wizard;;
+        doctor)     doctor;;
+        status)     cmd_status;;
+        install)    case "${1:-}" in
+                        panel) install_panel;; node) shift; install_node "$@";; sub) install_sub;;
+                        egames) egames_run;; "") require_root; menu_install;;
+                        *) die "install panel|node|sub|egames";;
+                    esac;;
+        web)        require_root
+                    case "${1:-apply}" in
+                        apply) web_apply;; show) web_render;; url) panel_login_url;;
+                        *) die "web apply|show|url";;
+                    esac;;
+        acme)       require_root; acme_hook "${1:?pre|post|deploy}";;
+        daemon)     daemon_run;;
+        bans)       ban_list;;
+        ban)        require_root; [[ -n "${1:-}" ]] || die "fail2detect ban <ip> [срок]"
+                    ban_add "$1" "$(to_seconds "${2:-1d}")" manual "${3:-вручную}";;
+        unban)      require_root; [[ -n "${1:-}" ]] || die "fail2detect unban <ip>"; ban_remove "$1";;
+        log|audit)  audit_show "$@";;
+        stats)      audit_stats;;
+        trust)      require_root
+                    case "${1:-list}" in
+                        add) trust_add "${2:?ip}";; del|rm) trust_del "${2:?ip}";;
+                        *) echo "${TRUSTED_IPS:-пусто}";;
+                    esac;;
+        fw)         require_root
+                    case "${1:-status}" in
+                        apply) fw_apply "${2:-}";; status) fw_status;; disable|off) fw_disable;;
+                        rollback) fw_rollback;; show) fw_render;;
+                        *) die "fw apply|status|disable|rollback|show";;
+                    esac;;
+        port)       require_root
+                    case "${1:-}" in
+                        open) fw_port_open "${2:?порт}" "${3:-tcp}";;
+                        close) fw_port_close "${2:?порт}" "${3:-tcp}";;
+                        *) die "port open|close <порт> [tcp|udp]";;
+                    esac;;
+        blocklist)  require_root; blocklist_update;;
+        jail)       case "${1:-status}" in
+                        status) jail_status;;
+                        enable) require_root; jail_set_enabled "${2:?имя}" yes;;
+                        disable) require_root; jail_set_enabled "${2:?имя}" no;;
+                        test) jail_test "${2:?имя}" "${3:-}";;
+                        *) die "jail status|enable|disable|test";;
+                    esac;;
+        node)       require_root
+                    case "${1:-}" in
+                        add) node_add "${2:-}";;
+                        transport) node_transport_change "${2:-}";;
+                        prepare) shift; node_prepare_cli "$@";;
+                        inbound-json) node_inbound_json "${2:-}" "${3:-443}" "${4:-}" "${5:-}";;
+                        port) node_port_change "${2:?порт}" "${3:-}";;
+                        api-port) node_api_port_change "${2:?порт}";;
+                        inbounds) rw_show_inbounds;;
+                        logs) node_logs_enable;;
+                        *) die "node add|transport|port|prepare|inbound-json|api-port|inbounds|logs";;
+                    esac;;
+        geo|geocheck) geocheck_run "${1:-}";;
+        speed|speedtest)
+                    if [[ "${1:-}" == --tui ]]; then speedtest_tui; else speedtest_run "${1:-}"; fi;;
+        config)     cmd_config "$@";;
+        update)     cmd_update;;
+        uninstall)  cmd_uninstall;;
+        *)          err "Неизвестная команда: $cmd"; usage; exit 1;;
+    esac
+}
+
+main "$@"
