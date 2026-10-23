@@ -87,9 +87,9 @@ node_compose_add_certs && fail "повторный запуск изменил �
 STUB_NODE=yes
 
 section "Защита администратора"
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { printf '%s\n' "Accepted publickey for root from 77.1.1.1 port 51000 ssh2: ED25519 SHA256:x" "Failed password for root from 77.2.2.2 port 1 ssh2"; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 who() { [[ "${1:-}" == --ips ]] && echo "root     pts/0        2026-10-23 22:00 88.3.3.3"; }
 [[ -n "$(ban_ignored 77.1.1.1)" ]] && pass "успешный вход по SSH → не банится" || fail "успешный вход по SSH → не банится"
 [[ -n "$(ban_ignored 88.3.3.3)" ]] && pass "открытая SSH-сессия → не банится" || fail "открытая SSH-сессия → не банится"
