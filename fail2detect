@@ -99,7 +99,8 @@ cmd_config() {
     if [[ $# -eq 1 ]]; then echo "${!1:-}"; return; fi
     require_root
     config_set "$1" "$2"
-    ok "$1=$2"
+    [[ "$1" == RW_API_URL ]] && rw_normalize_url
+    case "$1" in *TOKEN*|*COOKIE*) ok "$1 задан";; *) ok "$1=${!1}";; esac
     case "$1" in
         FW_MODE|SSH_PORTS|PUBLIC_*|XRAY_PORTS|NODE_API_PORT|PANEL_IPS|TRUSTED_IPS|STEALTH_ICMP|DOCKER_GUARD|FLOOD_*) fw_apply;;
     esac

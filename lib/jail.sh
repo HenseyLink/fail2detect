@@ -271,6 +271,7 @@ jail_loop() {
             fi
         done
         [[ -z "$ip" ]] && continue
+        is_private_ip "$ip" && continue   # link-local/мультикаст хостера, локальные сети — тихо мимо
         printf -v t '%(%s)T' -1
         # окно FINDTIME
         kept=""; cnt=0
@@ -323,7 +324,8 @@ daemon_run() {
     done
     ((${#pids[@]})) || warn "Нет включённых jail — работают только фаервол и блок-листы"
     audit_write START - - - "демон запущен, jail: $(jail_names | xargs)"
-    trap 'audit_write STOP - - - "демон остановлен"; kill 0 2>/dev/null; exit 0' TERM INT
+    # сначала снимаем обработчик, иначе kill 0 запускает его в каждом процессе группы
+    trap 'trap - TERM INT; audit_write STOP - - - "демон остановлен"; kill 0 2>/dev/null; exit 0' TERM INT
     while true; do
         sleep 600 & wait $!
         _with_lock ban_prune

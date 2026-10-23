@@ -97,6 +97,12 @@ who() { [[ "${1:-}" == --ips ]] && echo "root     pts/0        2026-10-23 22:00 
 unset -f journalctl who
 is_yes yy && is_yes "Да" && is_yes " y" && ! is_yes n && ! is_yes "" && pass "is_yes: yy/Да/y — да, n/пусто — нет" || fail "is_yes"
 
+section "Адрес API панели"
+[[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \
+    && pass "ссылка входа eGames → адрес + cookie" || fail "ссылка входа eGames" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"
+[[ "$(rw_parse_url 'https://panel.example.com/')" == $'https://panel.example.com\t' ]] && pass "голый адрес не меняется" || fail "голый адрес"
+[[ "$(rw_parse_url 'http://127.0.0.1:3000')" == $'http://127.0.0.1:3000\t' ]] && pass "локальный API с портом" || fail "локальный API с портом"
+
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
 [[ "$("$ROOT/fail2detect" version)" == "fail2detect $F2D_VERSION" ]] && pass "fail2detect version" || fail "fail2detect version"

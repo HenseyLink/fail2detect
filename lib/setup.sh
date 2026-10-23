@@ -185,9 +185,13 @@ doctor() {
 
     if has_node || has_panel; then
         title "Remnawave / Xray"
+        rw_normalize_url
         if [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; then
             _chk warn "Панель на другом сервере — inbound'ы проверяются на сервере панели" "или: fail2detect config RW_API_URL https://панель + токен"
-        elif F2D_NO_PROMPT=1 rw_api_ok 2>/dev/null; then
+        elif ! F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1; then
+            _chk warn "API-токен панели не задан — проверка inbound'ов пропущена" "fail2detect config RW_API_TOKEN <токен из панели>"
+        elif info "Проверяю API панели ($RW_API_URL, до 10 с)…" && \
+             F2D_NO_PROMPT=1 F2D_API_CONNECT_TIMEOUT=5 F2D_API_MAX_TIME=10 rw_api_ok 2>/dev/null </dev/null; then
             local tag port tr
             while IFS=$'\t' read -r _ _ tag port _ tr; do
                 case "$tr" in
@@ -197,9 +201,9 @@ doctor() {
                     *) _chk bad "$tag :$port — $tr (без шифрования транспорта)" "такой inbound легко детектируется";;
                 esac
                 [[ "$port" == 443 ]] || _chk ok "$tag на нестандартном порту $port"
-            done < <(rw_inbounds 2>/dev/null)
+            done < <(F2D_NO_PROMPT=1 F2D_API_CONNECT_TIMEOUT=5 F2D_API_MAX_TIME=10 rw_inbounds 2>/dev/null </dev/null)
         else
-            _chk warn "Нет доступа к API панели — проверка inbound'ов пропущена" "токен: $F2D_CONF_DIR/api_token или RW_API_TOKEN"
+            _chk warn "API панели не ответило ($RW_API_URL)" "проверьте адрес, токен ($F2D_CONF_DIR/api_token или RW_API_TOKEN) и cookie eGames (RW_API_COOKIE)"
         fi
         has_node && ! has_panel && [[ -z "$(detect_panel_ips)" ]] && _chk bad "IP панели неизвестен — API ноды некому разрешить" "fail2detect config PANEL_IPS <ip>"
     fi

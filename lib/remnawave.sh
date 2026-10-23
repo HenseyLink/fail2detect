@@ -10,6 +10,28 @@
 
 RW_TOKEN_FILE="${F2D_CONF_DIR}/api_token"
 
+# В RW_API_URL часто вставляют ссылку входа eGames целиком:
+#   https://panel.example.com/auth/login?abcd=EFGH
+# Нужен только адрес (https://panel.example.com), а ?abcd=EFGH — это cookie.
+# Печатает "url<TAB>cookie" (cookie пустой, если его в ссылке не было).
+rw_parse_url() {
+    local u="${1%/}" base q cookie=""
+    base=$(sed -E 's#^(https?://[^/?]+).*#\1#' <<<"$u")
+    [[ "$u" == *\?* ]] && q="${u#*\?}" && [[ "$q" =~ ^([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)$ ]] && cookie="$q"
+    printf '%s\t%s\n' "$base" "$cookie"
+}
+
+# привести RW_API_URL/RW_API_COOKIE в порядок (и сохранить, если поменялись)
+rw_normalize_url() {
+    [[ -n "${RW_API_URL:-}" ]] || return 0
+    local base cookie; IFS=$'\t' read -r base cookie < <(rw_parse_url "$RW_API_URL")
+    if [[ "$base" != "$RW_API_URL" ]]; then
+        [[ -w "$F2D_CONF" ]] && config_set RW_API_URL "$base" || RW_API_URL="$base"
+        [[ -n "$cookie" && -z "${RW_API_COOKIE:-}" ]] && { [[ -w "$F2D_CONF" ]] && config_set RW_API_COOKIE "$cookie" || RW_API_COOKIE="$cookie"; }
+        info "RW_API_URL исправлен на $base${cookie:+ (ключ входа сохранён как RW_API_COOKIE)}" >&2
+    fi
+}
+
 rw_token() {
     [[ -n "${_RW_TOKEN:-}" ]] && { echo "$_RW_TOKEN"; return; }
     local t="$RW_API_TOKEN"
@@ -30,12 +52,14 @@ rw_token() {
 rw_api() {
     local method="$1" path="$2" data="${3:-}" token hdr
     token=$(rw_token) || return 1
+    rw_normalize_url
     hdr=$(printf 'Authorization: Bearer %s\nContent-Type: application/json\nX-Forwarded-For: 127.0.0.1\nX-Forwarded-Proto: https\n' "$token")
     [[ -n "${RW_API_COOKIE:-}" ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
+    local ct="${F2D_API_CONNECT_TIMEOUT:-10}" mt="${F2D_API_MAX_TIME:-60}"
     if [[ -n "$data" ]]; then
-        printf '%s' "$data" | curl -sS --connect-timeout 10 --max-time 60 -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr") --data-binary @-
+        printf '%s' "$data" | curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr") --data-binary @-
     else
-        curl -sS --connect-timeout 10 --max-time 60 -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr")
+        curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr") </dev/null
     fi
 }
 
@@ -47,12 +71,14 @@ rw_api_ok() {   # проверка доступа к API
 rw_need_api() {
     if [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; then
         warn "Панели на этом сервере нет."
-        ask "Адрес API панели (например https://panel.example.com)" ""
+        ask "Адрес панели или ссылка входа eGames целиком" ""
         [[ -n "$REPLY" ]] || return 1
-        config_set RW_API_URL "$REPLY"
-        info "Если панель закрыта cookie-ключом eGames, укажите его: name=value из ссылки входа"
-        ask "Cookie (пусто — пропустить)" ""
-        [[ -n "$REPLY" ]] && config_set RW_API_COOKIE "$REPLY"
+        config_set RW_API_URL "$REPLY"; rw_normalize_url
+        if [[ -z "${RW_API_COOKIE:-}" ]]; then
+            info "Если панель закрыта ключом eGames, укажите его: name=value из ссылки входа"
+            ask "Cookie (пусто — пропустить)" ""
+            [[ -n "$REPLY" ]] && config_set RW_API_COOKIE "$REPLY"
+        fi
     fi
     rw_api_ok || { err "API панели недоступно по $RW_API_URL (проверьте токен/адрес)"; rm -f "$RW_TOKEN_FILE"; return 1; }
 }
