@@ -1,6 +1,6 @@
 [Unit]
 Description=fail2detect — защита Remnawave (фаервол + бан-движок)
-Documentation=https://github.com/fail2detect/fail2detect
+Documentation=https://github.com/HenseyLink/fail2detect
 After=network-online.target nftables.service ufw.service docker.service
 Wants=network-online.target
 

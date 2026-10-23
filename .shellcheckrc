@@ -7,3 +7,5 @@ disable=SC2155
 # sed по ESC-последовательностям нагляднее, чем ${//}.
 disable=SC2001
 external-sources=true
+# Функции из lib/ вызываются с аргументами из других файлов — старый shellcheck (0.9, Ubuntu) этого не видит.
+disable=SC2119,SC2120

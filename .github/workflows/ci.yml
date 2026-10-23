@@ -8,7 +8,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
@@ -25,7 +25,7 @@ jobs:
       matrix:
         image: ["debian:12", "ubuntu:22.04", "ubuntu:24.04"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: tests in ${{ matrix.image }}
         run: RUN_CONFIGS=0 IMAGE=${{ matrix.image }} tests/run.sh
 
@@ -33,6 +33,6 @@ jobs:
     needs: shellcheck
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: xray -test и nginx -t на сгенерированных конфигах
         run: bash tests/configs.sh

@@ -2,7 +2,7 @@
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
 F2D_VERSION="0.1.0"
-F2D_REPO="${F2D_REPO:-fail2detect/fail2detect}"
+F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
 F2D_CONF="${F2D_CONF_DIR}/fail2detect.conf"

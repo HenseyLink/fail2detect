@@ -12,7 +12,7 @@
 ## Установка
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/fail2detect/fail2detect/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/install.sh)
 ```
 
 Скрипт ставит зависимости (`nftables curl jq`), копирует файлы в `/opt/fail2detect` и создаёт команду `fail2detect`. Затем он предлагает запустить мастер настройки.

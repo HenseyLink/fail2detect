@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Установщик fail2detect:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/fail2detect/fail2detect/main/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/install.sh)
 set -euo pipefail
 
-REPO="${F2D_REPO:-fail2detect/fail2detect}"
+REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 BRANCH="${F2D_BRANCH:-main}"
 DEST="/opt/fail2detect"
 MODE="${1:-}"
