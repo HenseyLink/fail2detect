@@ -122,7 +122,8 @@ else
     STUB_MODE=nft FLOOD_GUARD=yes STEALTH_ICMP=yes DOCKER_GUARD=yes
     ensure_dirs
     : > "$F2D_STATE_DIR/blocklist4.txt"
-    for i in $(seq 1 1200); do echo "11.$((i / 250)).$((i % 250)).0/24"; done >> "$F2D_STATE_DIR/blocklist4.txt"
+    # /26 в разных /24 — несмежные, auto-merge их не склеит
+    for i in $(seq 1 1200); do echo "11.$((i / 250)).$((i % 250)).0/26"; done >> "$F2D_STATE_DIR/blocklist4.txt"
     echo "2a0c:1::/32" > "$F2D_STATE_DIR/blocklist6.txt"
     check "fw_apply" fw_apply
     check "таблица загружена" nft list table inet fail2detect

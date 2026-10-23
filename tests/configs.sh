@@ -35,7 +35,8 @@ for t in "${TRANSPORTS[@]}"; do
     inb=$(jq --arg id "$uuid" 'if .protocol == "hysteria" then .settings.clients = [{id:$id, auth:$id, email:"1"}]
         else .settings.clients = [{id:$id, email:"1"} + (if .streamSettings.network == "raw" then {flow:"xtls-rprx-vision"} else {} end)] end' <<<"$inb")
     profile_config "$inb" > "$WORK/$t.json"
-    if out=$(docker run --rm -v "$WORK/$t.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" -v /dev/shm:/dev/shm \
+    # от имени владельца файлов: образ Xray не root, а ключ — 600 (remnanode же работает от root)
+    if out=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/$t.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" -v /dev/shm:/dev/shm \
             "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
         pass "xray: $t"
     else
