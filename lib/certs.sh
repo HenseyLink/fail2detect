@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# fail2detect — сертификаты Let's Encrypt (certbot).
+# fail2detect — сертификаты.
 #
-#   CERT_METHOD=http        HTTP-01: порт 80 открывается в фаерволе только на время проверки
+# Где ищем готовый сертификат (в этом порядке):
+#   1) Let's Encrypt / certbot — /etc/letsencrypt/live/<lineage>/
+#   2) Caddy — если на сервере работает Caddy, он сам выпускает и продлевает
+#      сертификаты (docker-том caddy_data или стандартные пути Caddy)
+# Если готового нет — выпускаем certbot'ом:
+#   CERT_METHOD=http        HTTP-01: порт 80 открывается в фаерволе на время проверки
 #   CERT_METHOD=cloudflare  DNS-01 через API Cloudflare (порт 80 не нужен, можно wildcard)
-# Продление — штатный таймер certbot; хуки fail2detect открывают/закрывают
-# порт 80 и раскладывают обновлённый сертификат по nginx и ноде.
+# Способ можно сменить в любой момент: fail2detect cert method.
 
 LE_LIVE="/etc/letsencrypt/live"
 CF_INI="${F2D_CONF_DIR}/cloudflare.ini"
@@ -15,68 +19,127 @@ cert_deps() {
     pkg_install certbot python3-certbot-dns-cloudflare || pkg_install certbot || die "Не удалось установить certbot"
 }
 
-# каталог lineage, чей сертификат покрывает домен (в т.ч. wildcard)
+# покрывает ли сертификат домен (точное имя или wildcard одного уровня)
+_cert_covers() {   # файл домен
+    local name
+    while read -r name; do
+        [[ "$name" == "$2" ]] && return 0
+        [[ "$name" == \*.* && "$2" == *."${name#\*.}" && "${2%%.*}.${name#\*.}" == "$2" ]] && return 0
+    done < <(openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS://p')
+    return 1
+}
+
+# каталог lineage certbot, чей сертификат покрывает домен
 cert_dir() {
-    local domain="$1" d san
+    local d
     for d in "$LE_LIVE"/*/; do
-        [[ -f "$d/fullchain.pem" ]] || continue
-        san=$(openssl x509 -in "$d/fullchain.pem" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS://p')
-        while read -r name; do
-            [[ "$name" == "$domain" ]] && { echo "${d%/}"; return 0; }
-            [[ "$name" == \*.* && "$domain" == *."${name#\*.}" && "${domain%%.*}.${name#\*.}" == "$domain" ]] && { echo "${d%/}"; return 0; }
-        done <<<"$san"
+        [[ -f "$d/fullchain.pem" ]] && _cert_covers "$d/fullchain.pem" "$1" && { echo "${d%/}"; return 0; }
     done
     return 1
 }
 
-cert_days_left() {
-    local end; end=$(openssl x509 -in "$1/fullchain.pem" -noout -enddate 2>/dev/null | cut -d= -f2) || return 1
+# каталоги хранилища сертификатов Caddy на этом сервере
+caddy_cert_roots() {
+    local v mp
+    # shellcheck disable=SC2086  # список каталогов через пробел — для тестов
+    [[ -n "${F2D_CADDY_ROOTS:-}" ]] && { printf '%s\n' $F2D_CADDY_ROOTS; return; }
+    if have docker; then
+        for v in $(docker volume ls -q 2>/dev/null | grep -i caddy); do
+            mp=$(docker volume inspect "$v" -f '{{.Mountpoint}}' 2>/dev/null)
+            [[ -d "$mp/caddy/certificates" ]] && echo "$mp/caddy/certificates"
+        done
+    fi
+    for v in /var/lib/caddy/.local/share/caddy/certificates /root/.local/share/caddy/certificates \
+             /opt/*/caddy_data/caddy/certificates /opt/*/caddy/data/caddy/certificates; do
+        [[ -d "$v" ]] && echo "$v"
+    done
+}
+
+# сертификат Caddy для домена -> "файл_сертификата файл_ключа"
+caddy_cert_files() {
+    local root d name
+    while read -r root; do
+        for d in "$root"/*/"$1" "$root"/*/"wildcard_.${1#*.}"; do
+            name="${d##*/}"
+            [[ -f "$d/$name.crt" && -f "$d/$name.key" ]] || continue
+            _cert_covers "$d/$name.crt" "$1" && { echo "$d/$name.crt $d/$name.key"; return 0; }
+        done
+    done < <(caddy_cert_roots | sort -u)
+    return 1
+}
+
+# любой готовый сертификат -> "файл_сертификата файл_ключа источник"
+cert_files() {   # домен
+    local dir pair
+    if dir=$(cert_dir "$1"); then echo "$dir/fullchain.pem $dir/privkey.pem certbot"; return 0; fi
+    if pair=$(caddy_cert_files "$1"); then echo "$pair caddy"; return 0; fi
+    return 1
+}
+
+cert_days_left() {   # файл_сертификата
+    local end; end=$(openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2) || return 1
     echo $(( ($(date -d "$end" +%s) - $(now)) / 86400 ))
 }
 
-cert_ask_method() {
-    [[ -n "${CERT_METHOD:-}" ]] && return 0
+cert_ask_method() {   # [--again] — спросить, даже если способ уже выбран
+    [[ -n "${CERT_METHOD:-}" && "${1:-}" != --again ]] && return 0
     echo "  Как получать сертификаты:"
-    echo "   1. HTTP-01 — нужен A-запись домена на этот сервер, порт 80 откроется на минуту"
-    echo "   2. Cloudflare DNS — нужен API-токен Cloudflare (Zone.DNS:Edit), порт 80 не нужен"
-    ask "Способ" "1"
+    echo "   1. HTTP-01 — A-запись домена на этот сервер, порт 80 свободен (откроется на минуту)"
+    echo "   2. Cloudflare DNS — API-токен Cloudflare с правом Zone.DNS:Edit, порт 80 не нужен"
+    ask "Способ" "$([[ "${CERT_METHOD:-}" == cloudflare ]] && echo 2 || echo 1)"
     if [[ "$REPLY" == 2 ]]; then
         config_set CERT_METHOD cloudflare
-        if [[ ! -s "$CF_INI" ]]; then
-            local tok; read_secret "Cloudflare API token (вставьте)"; tok="$REPLY"
+        if [[ ! -s "$CF_INI" || "${1:-}" == --again ]]; then
+            read_secret "Cloudflare API token (вставьте)"
+            [[ -n "$REPLY" ]] || { warn "Токен не задан"; return 1; }
             install -m 600 /dev/null "$CF_INI"
-            printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$CF_INI"
+            printf 'dns_cloudflare_api_token = %s\n' "$REPLY" > "$CF_INI"
         fi
     else
         config_set CERT_METHOD http
     fi
-    ask "E-mail для Let's Encrypt (пусто — без e-mail)" ""
+    ask "E-mail для Let's Encrypt (пусто — без e-mail)" "${CERT_EMAIL:-}"
     config_set CERT_EMAIL "$REPLY"
 }
 
-# получить сертификат, если его ещё нет
+# получить сертификат, если готового нет
 cert_ensure() {   # domain
-    local domain="$1" dir
-    if dir=$(cert_dir "$domain"); then
-        local left; left=$(cert_days_left "$dir")
-        ok "Сертификат для $domain есть ($dir, осталось ${left:-?} дн.)"
+    local domain="$1" found
+    if found=$(cert_files "$domain"); then
+        local f src; f="${found%% *}"; src="${found##* }"
+        ok "Сертификат для $domain есть ($src: ${f%/*}, осталось $(cert_days_left "$f" || echo ?) дн.)"
         return 0
     fi
     cert_deps
-    cert_ask_method
+    cert_ask_method || return 1
     cert_hooks_install
-    local mail=(--register-unsafely-without-email)
+    local try
+    for try in 1 2; do
+        _cert_issue "$domain" && return 0
+        # не вышло — предложить другой способ, а не молча падать с запомненным
+        [[ -t 0 ]] || return 1
+        warn "Выпустить сертификат способом «$CERT_METHOD» не получилось."
+        confirm "Выбрать способ заново (например, Cloudflare DNS)?" y || return 1
+        cert_ask_method --again || return 1
+    done
+    return 1
+}
+
+_cert_issue() {   # domain
+    local domain="$1" rc=0 mail=(--register-unsafely-without-email)
     [[ -n "${CERT_EMAIL:-}" ]] && mail=(-m "$CERT_EMAIL")
     info "Выпускаю сертификат для $domain ($CERT_METHOD)…"
-    local rc=0
     if [[ "$CERT_METHOD" == cloudflare ]]; then
+        [[ -s "$CF_INI" ]] || { err "Нет токена Cloudflare ($CF_INI)"; return 1; }
         local base="$domain"; [[ "$domain" == *.*.* ]] && base="${domain#*.}"
         certbot certonly --non-interactive --agree-tos "${mail[@]}" \
             --dns-cloudflare --dns-cloudflare-credentials "$CF_INI" --dns-cloudflare-propagation-seconds 30 \
             -d "$base" -d "*.$base" --cert-name "$base" || rc=$?
     else
         if ss -H -tln '( sport = :80 )' | grep -q .; then
-            err "Порт 80 занят ($(ss -H -tlnp '( sport = :80 )' | grep -o 'users:(("[^"]*' | cut -d'"' -f2)) — HTTP-01 невозможен. Выберите Cloudflare DNS."
+            local who; who=$(ss -H -tlnp '( sport = :80 )' | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | head -1)
+            err "Порт 80 занят (${who:-?}) — HTTP-01 невозможен."
+            [[ "$who" == caddy ]] && info "Caddy сам выпускает сертификаты, но для $domain готового у него не нашлось."
             return 1
         fi
         acme_port80 open
@@ -101,13 +164,26 @@ acme_port80() {
     return 0
 }
 
-# сертификат для Xray кладём копией в <node_dir>/certs (монтируется в контейнер)
+# сертификат для Xray — копией в <node_dir>/certs (монтируется в контейнер)
 cert_install_for_node() {   # domain
-    local d dir; d=$(node_dir); dir=$(cert_dir "$1") || return 1
+    local d found; d=$(node_dir); found=$(cert_files "$1") || return 1
     [[ -n "$d" ]] || return 1
+    local crt key; read -r crt key _ <<<"$found"
     install -d -m 700 "$d/certs"
-    install -m 644 "$dir/fullchain.pem" "$d/certs/fullchain.pem"
-    install -m 600 "$dir/privkey.pem" "$d/certs/privkey.pem"
+    install -m 644 "$crt" "$d/certs/fullchain.pem"
+    install -m 600 "$key" "$d/certs/privkey.pem"
+}
+
+# Копия в ноде отстала от источника (продлил certbot или Caddy)? Обновить и
+# перезапустить ноду. Вызывается демоном раз в 10 минут и хуком certbot.
+cert_sync_node() {
+    [[ -n "${NODE_TLS_DOMAIN:-}" ]] && has_node || return 0
+    local d found crt; d=$(node_dir); found=$(cert_files "$NODE_TLS_DOMAIN") || return 0
+    crt="${found%% *}"
+    cmp -s "$crt" "$d/certs/fullchain.pem" && return 0
+    cert_install_for_node "$NODE_TLS_DOMAIN" || return 0
+    docker restart remnanode >/dev/null 2>&1 || true
+    audit_write CERT - - - "сертификат $NODE_TLS_DOMAIN обновлён в ноде"
 }
 
 cert_hooks_install() {
@@ -125,10 +201,33 @@ acme_hook() {
         pre)  [[ "$(grep -h '^authenticator' /etc/letsencrypt/renewal/*.conf 2>/dev/null)" == *standalone* ]] && acme_port80 open;;
         post) acme_port80 close;;
         deploy)
-            if [[ -n "${NODE_TLS_DOMAIN:-}" ]] && has_node && cert_install_for_node "$NODE_TLS_DOMAIN"; then
-                docker restart remnanode >/dev/null 2>&1 || true
-            fi
+            cert_sync_node
             docker exec "$F2D_WEB_CONTAINER" nginx -s reload >/dev/null 2>&1 || true
             audit_write CERT - - - "сертификат продлён: ${RENEWED_DOMAINS:-?}";;
+    esac
+}
+
+# fail2detect cert list | method | issue <домен>
+cert_cli() {
+    case "${1:-list}" in
+        method) require_root; cert_ask_method --again && ok "Способ выпуска: $CERT_METHOD";;
+        issue)  require_root; [[ -n "${2:-}" ]] || die "fail2detect cert issue <домен>"; cert_deps; cert_ensure "$2";;
+        list)
+            title "Сертификаты"
+            printf '  %-28s %s\n' "Способ выпуска:" "${CERT_METHOD:-не выбран (спросит при первом выпуске)}"
+            local d f
+            for d in "$LE_LIVE"/*/; do
+                f="$d/fullchain.pem"; [[ -f "$f" ]] || continue
+                printf '  certbot  %-32s осталось %s дн.\n' "$(basename "$d")" "$(cert_days_left "$f" || echo ?)"
+            done
+            while read -r root; do
+                for f in "$root"/*/*/*.crt; do
+                    [[ -f "$f" ]] || continue
+                    printf '  caddy    %-32s осталось %s дн.\n' "$(basename "$f" .crt)" "$(cert_days_left "$f" || echo ?)"
+                done
+            done < <(caddy_cert_roots | sort -u)
+            [[ -n "${NODE_TLS_DOMAIN:-}" ]] && printf '  %-28s %s\n' "В ноде (Xray TLS):" "$NODE_TLS_DOMAIN"
+            ;;
+        *) die "cert list|method|issue <домен>";;
     esac
 }

@@ -65,6 +65,11 @@ ${C_BOLD}Нода Remnawave${C_RESET}
 
   Транспорты: tcp-reality, xhttp-reality, xhttp-tls, grpc-reality, grpc-tls, hysteria2
 
+${C_BOLD}Сертификаты${C_RESET}
+  cert list                 найденные сертификаты (certbot и Caddy) и способ выпуска
+  cert method               выбрать способ выпуска заново (HTTP-01 / Cloudflare DNS)
+  cert issue <домен>        выпустить или найти сертификат для домена
+
 ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
 
@@ -318,6 +323,7 @@ main() {
                         *) die "web apply|show|url";;
                     esac;;
         acme)       require_root; acme_hook "${1:?pre|post|deploy}";;
+        cert|certs) cert_cli "$@";;
         daemon)     daemon_run;;
         bans)       ban_list;;
         ban)        require_root; [[ -n "${1:-}" ]] || die "fail2detect ban <ip> [срок]"

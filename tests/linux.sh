@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317,SC2329  # заглушки функций вызываются из подключаемых модулей
 # Тесты fail2detect. Части с nftables нужны root и nft (запускайте через
 # tests/run.sh — он поднимет изолированный контейнер). Без nft выполняются
 # только тесты регулярок и CLI.
@@ -96,6 +97,24 @@ who() { [[ "${1:-}" == --ips ]] && echo "root     pts/0        2026-10-23 22:00 
 [[ -z "$(ban_ignored 77.2.2.2)" ]] && pass "неудачный вход → банится" || fail "неудачный вход → банится"
 unset -f journalctl who
 is_yes yy && is_yes "Да" && is_yes " y" && ! is_yes n && ! is_yes "" && pass "is_yes: yy/Да/y — да, n/пусто — нет" || fail "is_yes"
+
+section "Сертификаты (certbot и Caddy)"
+mkc() { mkdir -p "$1"; openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=$3" -addext "subjectAltName=DNS:$3" \
+          -keyout "$1/$2.key" -out "$1/$2.crt" >/dev/null 2>&1; }
+CR="$WORK/caddy/certificates/acme-v02.api.letsencrypt.org-directory"
+mkc "$CR/lv.example.com" lv.example.com lv.example.com
+mkc "$CR/wildcard_.example.org" wildcard_.example.org '*.example.org'
+LE_LIVE="$WORK/le-empty"; export F2D_CADDY_ROOTS="$WORK/caddy/certificates"
+r=$(cert_files lv.example.com); [[ "$r" == *"/lv.example.com/lv.example.com.crt "*" caddy" ]] && pass "сертификат Caddy найден" || fail "сертификат Caddy" "$r"
+r=$(cert_files node.example.org); [[ "$r" == *wildcard_.example.org* ]] && pass "wildcard Caddy покрывает поддомен" || fail "wildcard Caddy" "$r"
+cert_files other.example.net >/dev/null && fail "нашёлся чужой сертификат" || pass "чужой домен — не найден"
+if date -d now >/dev/null 2>&1; then   # GNU date (на Linux всегда)
+    d=$(cert_days_left "$CR/lv.example.com/lv.example.com.crt"); [[ "$d" =~ ^(29|30)$ ]] && pass "срок сертификата: $d дн." || fail "срок сертификата" "$d"
+fi
+mkdir -p "$WORK/node/certs"; node_dir() { echo "$WORK/node"; }; has_node() { true; }; docker() { :; }
+NODE_TLS_DOMAIN=lv.example.com; cert_sync_node
+cmp -s "$CR/lv.example.com/lv.example.com.crt" "$WORK/node/certs/fullchain.pem" && pass "сертификат Caddy скопирован в ноду" || fail "копия в ноду"
+NODE_TLS_DOMAIN=""; unset F2D_CADDY_ROOTS; unset -f docker
 
 section "Адрес API панели"
 [[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \

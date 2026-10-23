@@ -329,6 +329,7 @@ daemon_run() {
     while true; do
         sleep 600 & wait $!
         _with_lock ban_prune
+        cert_sync_node 2>/dev/null   # Caddy/certbot продлили сертификат — обновить копию в ноде
     done
 }
 
