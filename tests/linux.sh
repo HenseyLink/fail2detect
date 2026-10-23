@@ -144,6 +144,12 @@ else
     echo "2a0c:1::/32" > "$F2D_STATE_DIR/blocklist6.txt"
     check "fw_apply" fw_apply
     check "таблица загружена" nft list table inet fail2detect
+
+    # служба, таймер блок-листов и пользователь могут применять правила одновременно
+    pids=(); for i in 1 2 3 4 5; do ( fw_apply >/dev/null 2>"$WORK/par$i.err" ) & pids+=($!); done
+    pfail=0; for p in "${pids[@]}"; do wait "$p" || pfail=$((pfail + 1)); done
+    (( pfail == 0 )) && pass "5 одновременных fw_apply — все успешны" || fail "одновременные fw_apply" "упало: $pfail; $(cat "$WORK"/par*.err | head -3)"
+    ls "$F2D_STATE_DIR"/fail2detect.nft.?????? >/dev/null 2>&1 && fail "остались временные файлы правил" || pass "временные файлы убраны"
     n=$(nft -j list set inet fail2detect block4 | jq '[.nftables[].set.elem // empty | .[]] | length')
     [[ "$n" == 1200 ]] && pass "блок-лист: 1200 подсетей (пачками по 500)" || fail "блок-лист" "в наборе $n вместо 1200"
     nft list set inet fail2detect pub_tcp | grep -q 2233 && pass "SSH-порт в pub_tcp" || fail "SSH-порт в pub_tcp"

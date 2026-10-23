@@ -22,8 +22,10 @@ install_services() {
         install -m 644 "$F2D_SHARE/systemd/$u" "/etc/systemd/system/$u"
     done
     systemctl daemon-reload
-    systemctl enable --now fail2detect.service fail2detect-blocklist.timer >/dev/null 2>&1
-    systemctl restart fail2detect.service
+    systemctl enable fail2detect.service fail2detect-blocklist.timer >/dev/null 2>&1
+    # один запуск службы (а не enable --now + restart), таймер — после неё
+    systemctl restart fail2detect.service || warn "Служба не стартовала: journalctl -u fail2detect -n 30"
+    systemctl start fail2detect-blocklist.timer >/dev/null 2>&1
     ok "Службы fail2detect включены (демон + обновление блок-листов раз в сутки)"
 }
 

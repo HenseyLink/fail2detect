@@ -232,21 +232,31 @@ fw_render_elements() {
 fw_apply() {   # [--safe]
     local safe="${1:-}"
     ensure_dirs
-    local new="$F2D_NFT_FILE.new"
-    fw_render > "$new"
-    if ! nft -c -f "$new" 2>"$new.err"; then
-        err "Ошибка в сгенерированных правилах:"; cat "$new.err" >&2
-        return 1
-    fi
-    nft list table inet "$F2D_NFT_TABLE" > "$F2D_NFT_PREV" 2>/dev/null || rm -f "$F2D_NFT_PREV"
-    nft -f "$new" || { err "nft не смог применить правила"; return 1; }
-    mv -f "$new" "$F2D_NFT_FILE"; rm -f "$new.err"
-    [[ "$(fw_mode)" == ufw ]] && ufw logging low >/dev/null 2>&1
-    ok "Правила fail2detect применены (режим: $(fw_mode))"
+    # Применяют одновременно служба, таймер блок-листов и команды пользователя —
+    # без блокировки они затирали общий временный файл и друг другу PREV.
+    ( flock -w 90 9 || { err "Фаервол сейчас применяет другой процесс (ждал 90 с)"; exit 1; }
+      _fw_apply_locked ) 9>"$F2D_STATE_DIR/fw.lock" || return 1
 
     if [[ "$safe" == --safe && -t 0 ]]; then
         fw_confirm_or_rollback 60
     fi
+}
+
+_fw_apply_locked() {
+    local new; new=$(mktemp "$F2D_STATE_DIR/fail2detect.nft.XXXXXX") || return 1
+    fw_render > "$new"
+    if ! nft -c -f "$new" 2>"$new.err"; then
+        err "Ошибка в сгенерированных правилах:"; cat "$new.err" >&2
+        rm -f "$new" "$new.err"; return 1
+    fi
+    nft list table inet "$F2D_NFT_TABLE" > "$F2D_NFT_PREV" 2>/dev/null || rm -f "$F2D_NFT_PREV"
+    if ! nft -f "$new" 2>"$new.err"; then
+        err "nft не смог применить правила:"; cat "$new.err" >&2
+        rm -f "$new" "$new.err"; return 1
+    fi
+    chmod 600 "$new"; mv -f "$new" "$F2D_NFT_FILE"; rm -f "$new.err"
+    [[ "$(fw_mode)" == ufw ]] && ufw logging low >/dev/null 2>&1
+    ok "Правила fail2detect применены (режим: $(fw_mode))"
 }
 
 # Защита от «отрезал себе SSH»: откат, если не подтвердили
