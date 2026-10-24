@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.1.0"
+F2D_VERSION="0.3.0-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
@@ -39,19 +39,25 @@ hr()    { printf '%s%s%s\n' "$C_GRAY" "$(printf '─%.0s' $(seq 1 "${1:-60}"))" 
 title() { printf '\n%s%s%s\n' "$C_BOLD$C_MAGENTA" "$*" "$C_RESET"; hr; }
 
 # ask "Вопрос" [default] -> REPLY
-# Вопрос с редактированием строки: стрелки, Backspace, Home/End (readline).
-# Цветной префикс печатаем сами — readline неверно считает ширину ANSI-кодов.
+# Вопрос с редактированием строки (стрелки, Backspace, Home/End — readline).
+# Текст вопроса отдаём самому readline (read -e -p), а цветовые коды
+# оборачиваем в \001…\002: иначе readline не знает ширину вопроса, и
+# Backspace стирал его с экрана, хотя ввод продолжал ждать ответа.
+_rl() { [[ -n "$1" ]] && printf '\001%s\002' "$1"; }
 ask() {
-    local prompt="$1" def="${2:-}" e=()
-    [[ -t 0 ]] && e=(-e)
+    local prompt="$1" def="${2:-}" p
     if [[ -n "$def" ]]; then
-        printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GRAY" "$def" "$C_RESET" >&2
-        IFS= read -r "${e[@]}" REPLY || REPLY=""
-        REPLY="${REPLY:-$def}"
+        p="$(_rl "$C_YELLOW")?$(_rl "$C_RESET") $prompt $(_rl "$C_GRAY")[$def]$(_rl "$C_RESET"): "
     else
-        printf '%s?%s %s: ' "$C_YELLOW" "$C_RESET" "$prompt" >&2
-        IFS= read -r "${e[@]}" REPLY || REPLY=""
+        p="$(_rl "$C_YELLOW")?$(_rl "$C_RESET") $prompt: "
     fi
+    if [[ -t 0 ]]; then
+        IFS= read -r -e -p "$p" REPLY || REPLY=""
+    else
+        printf '%s' "${p//[$'\001\002']/}" >&2
+        IFS= read -r REPLY || REPLY=""
+    fi
+    [[ -z "$REPLY" && -n "$def" ]] && REPLY="$def"
     REPLY="${REPLY#"${REPLY%%[![:space:]]*}"}"; REPLY="${REPLY%"${REPLY##*[![:space:]]}"}"   # обрезать пробелы
 }
 
