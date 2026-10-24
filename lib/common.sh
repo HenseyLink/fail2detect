@@ -56,13 +56,15 @@ ask() {
 }
 
 # confirm "Вопрос" [y|n] — 0 если да
+# Ответ читаем в СВОЮ переменную: REPLY часто ещё хранит то, что ввели перед
+# вопросом (e-mail, IP), и «y» его затирал — так в конфиг попадал e-mail «y».
 confirm() {
-    local def="${2:-n}" hint="y/N"
+    local def="${2:-n}" hint="y/N" ans=""
     [[ "$def" == y ]] && hint="Y/n"
     [[ "${F2D_ASSUME_YES:-0}" == 1 ]] && return 0
-    read -r -p "$(printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$1" "$C_GRAY" "$hint" "$C_RESET")" REPLY
-    REPLY="${REPLY:-$def}"
-    is_yes "$REPLY"
+    printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$1" "$C_GRAY" "$hint" "$C_RESET" >&2
+    IFS= read -r ans || ans=""
+    is_yes "${ans:-$def}"
 }
 
 # Ввод секрета (токены): вставка ВИДНА — в скрытом режиме (read -s) кажется,

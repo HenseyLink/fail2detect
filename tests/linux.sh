@@ -158,6 +158,34 @@ for bad in / /etc /opt /root /home "$WORK"; do
     _safe_rmdir "$bad" 2>/dev/null && fail "_safe_rmdir согласился удалить $bad" || pass "_safe_rmdir отказал: $bad"
 done
 
+section "Вопросы и e-mail для сертификата"
+REPLY="me@example.com"; confirm "ok?" n < <(printf 'y\n') >/dev/null 2>&1
+[[ "$REPLY" == me@example.com ]] && pass "confirm не затирает введённое ранее (REPLY)" || fail "confirm затёр REPLY" "$REPLY"
+CERT_EMAIL=""; cert_ask_email < <(printf 'nelisyt@example.com\ny\n') >/dev/null 2>&1
+[[ "$CERT_EMAIL" == nelisyt@example.com ]] && pass "e-mail после «верно? y» — это e-mail, а не «y»" || fail "e-mail" "$CERT_EMAIL"
+CERT_EMAIL=""; cert_ask_email < <(printf 'not-an-email\nok@example.org\ny\n') >/dev/null 2>&1
+[[ "$CERT_EMAIL" == ok@example.org ]] && pass "неверный e-mail переспрашивается" || fail "переспрос e-mail" "$CERT_EMAIL"
+cert_email_valid y && fail "«y» принят за e-mail" || pass "«y» не считается e-mail'ом"
+# выпуск: не удался -> ничего не запомнено; удался -> запомнено
+cert_files() { return 1; }; cert_deps() { :; }; cert_hooks_install() { :; }
+_cert_issue() { return 1; }
+config_set CERT_METHOD ""; config_set CERT_EMAIL ""; CERT_METHOD=""; CERT_EMAIL=""
+cert_ensure x.example.com < <(printf '1\nfail@example.com\ny\nn\n') >/dev/null 2>&1
+load_config
+[[ -z "$CERT_METHOD" && -z "$CERT_EMAIL" ]] && pass "после неудачи способ и e-mail не запомнены" || fail "запомнено после неудачи" "$CERT_METHOD $CERT_EMAIL"
+_cert_issue() { return 0; }
+cert_ensure x.example.com < <(printf '1\ngood@example.com\ny\n') >/dev/null 2>&1
+load_config
+[[ "$CERT_METHOD" == http && "$CERT_EMAIL" == good@example.com ]] && pass "после успеха способ и e-mail запомнены" || fail "после успеха" "$CERT_METHOD $CERT_EMAIL"
+config_set CERT_EMAIL "y"; load_config
+cert_ensure x.example.com < <(printf '1\nnew@example.com\ny\n') >/dev/null 2>&1
+load_config
+[[ "$CERT_EMAIL" == new@example.com ]] && pass "сохранённый «y» распознан и переспрошен" || fail "сохранённый y" "$CERT_EMAIL"
+unset -f cert_files cert_deps cert_hooks_install _cert_issue
+# shellcheck source=/dev/null
+source "$ROOT/lib/certs.sh"
+config_set CERT_METHOD ""; config_set CERT_EMAIL ""; load_config
+
 section "Адрес API панели"
 [[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \
     && pass "ссылка входа → адрес + cookie" || fail "ссылка входа" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"

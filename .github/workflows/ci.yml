@@ -14,6 +14,11 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --version
           shellcheck -x -s bash fail2detect install.sh lib/*.sh tests/*.sh
+      - name: переменные вплотную к не-ASCII (в части локалей bash считает байты частью имени)
+        run: |
+          if LC_ALL=C grep -nP '\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xFF]' fail2detect install.sh lib/*.sh; then
+            echo "Оберните переменную в фигурные скобки: \${name}»"; exit 1
+          fi
       - name: bash -n
         run: for f in fail2detect install.sh lib/*.sh conf/jail.d/*.conf; do bash -n "$f"; done
 

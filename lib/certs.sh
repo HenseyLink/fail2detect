@@ -88,7 +88,7 @@ cert_ask_method() {   # [--again] — спросить, даже если спо
     echo "   2. Cloudflare DNS — API-токен Cloudflare с правом Zone.DNS:Edit, порт 80 не нужен"
     ask "Способ" "$([[ "${CERT_METHOD:-}" == cloudflare ]] && echo 2 || echo 1)"
     if [[ "$REPLY" == 2 ]]; then
-        config_set CERT_METHOD cloudflare
+        CERT_METHOD=cloudflare
         if [[ ! -s "$CF_INI" || "${1:-}" == --again ]]; then
             read_secret "Cloudflare API token (вставьте)"
             [[ -n "$REPLY" ]] || { warn "Токен не задан"; return 1; }
@@ -96,22 +96,31 @@ cert_ask_method() {   # [--again] — спросить, даже если спо
             printf 'dns_cloudflare_api_token = %s\n' "$REPLY" > "$CF_INI"
         fi
     else
-        config_set CERT_METHOD http
+        CERT_METHOD=http
     fi
     cert_ask_email
 }
 
+cert_email_valid() { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
+
+# запомнить способ и e-mail — только когда сертификат реально выпущен
+cert_save_choice() { config_set CERT_METHOD "$CERT_METHOD"; config_set CERT_EMAIL "${CERT_EMAIL:-}"; }
+cert_forget_choice() { config_set CERT_METHOD ""; config_set CERT_EMAIL ""; }
+
 # e-mail для Let's Encrypt: формат проверяем, ошибку можно исправить
 cert_ask_email() {
+    local email def="${CERT_EMAIL:-}"
+    cert_email_valid "$def" || def=""
     while true; do
-        ask "E-mail для Let's Encrypt (пусто — без e-mail)" "${CERT_EMAIL:-}"
-        if [[ -z "$REPLY" || "$REPLY" == "-" ]]; then config_set CERT_EMAIL ""; return 0; fi
-        if [[ ! "$REPLY" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            warn "«$REPLY» не похож на e-mail. Введите заново (или «-» — без e-mail)."
+        ask "E-mail для Let's Encrypt (пусто — без e-mail)" "$def"
+        email="$REPLY"
+        if [[ -z "$email" || "$email" == "-" ]]; then CERT_EMAIL=""; return 0; fi
+        if ! cert_email_valid "$email"; then
+            warn "«${email}» не похож на e-mail. Введите заново (или «-» — без e-mail)."
             continue
         fi
-        confirm "E-mail $REPLY — верно?" y || continue
-        config_set CERT_EMAIL "$REPLY"; return 0
+        confirm "E-mail $email — верно?" y || continue
+        CERT_EMAIL="$email"; return 0
     done
 }
 
@@ -124,15 +133,22 @@ cert_ensure() {   # domain
         return 0
     fi
     cert_deps
-    cert_ask_method || return 1
+    # в конфиге мог остаться неверный e-mail (раньше туда попадало «y») — спросить заново
+    if [[ -n "${CERT_EMAIL:-}" ]] && ! cert_email_valid "$CERT_EMAIL"; then
+        warn "Сохранённый e-mail «${CERT_EMAIL}» неверный — укажите заново."
+        CERT_EMAIL=""; cert_ask_method --again || return 1
+    else
+        cert_ask_method || return 1
+    fi
     cert_hooks_install
     local try
-    for try in 1 2; do
-        _cert_issue "$domain" && return 0
-        # не вышло — предложить другой способ, а не молча падать с запомненным
+    for try in 1 2 3; do
+        if _cert_issue "$domain"; then cert_save_choice; return 0; fi
+        # не вышло — ничего не запоминаем и предлагаем исправить способ/e-mail
+        cert_forget_choice
         [[ -t 0 ]] || return 1
-        warn "Выпустить сертификат способом «$CERT_METHOD» не получилось."
-        confirm "Выбрать способ заново (например, Cloudflare DNS)?" y || return 1
+        warn "Выпустить сертификат способом «${CERT_METHOD}»${CERT_EMAIL:+ (e-mail $CERT_EMAIL)} не получилось."
+        confirm "Исправить способ или e-mail и попробовать снова?" y || return 1
         cert_ask_method --again || return 1
     done
     return 1
@@ -223,7 +239,7 @@ acme_hook() {
 # fail2detect cert list | method | issue <домен>
 cert_cli() {
     case "${1:-list}" in
-        method) require_root; cert_ask_method --again && ok "Способ выпуска: $CERT_METHOD";;
+        method) require_root; cert_ask_method --again && cert_save_choice && ok "Способ выпуска: $CERT_METHOD${CERT_EMAIL:+, e-mail $CERT_EMAIL}";;
         issue)  require_root; [[ -n "${2:-}" ]] || die "fail2detect cert issue <домен>"; cert_deps; cert_ensure "$2";;
         list)
             title "Сертификаты"

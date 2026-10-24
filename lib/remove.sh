@@ -105,8 +105,8 @@ panel_forget_node() {
     while read -r n; do
         uuid=$(jq -r .uuid <<<"$n"); name=$(jq -r .name <<<"$n")
         puuid=$(jq -r '.configProfile.activeConfigProfileUuid // empty' <<<"$n")
-        confirm "Удалить в панели ноду «$name» ($me)?" y || continue
-        rw_api DELETE "/api/nodes/$uuid" >/dev/null && ok "Нода «$name» удалена из панели"
+        confirm "Удалить в панели ноду «${name}» ($me)?" y || continue
+        rw_api DELETE "/api/nodes/$uuid" >/dev/null && ok "Нода «${name}» удалена из панели"
         [[ -n "$puuid" ]] || continue
         local prof pname users
         prof=$(rw_api GET "/api/config-profiles/$puuid")
@@ -117,9 +117,9 @@ panel_forget_node() {
             for h in $(rw_api GET /api/hosts | jq -r --arg p "$puuid" '.response[] | select(.inbound.configProfileUuid == $p) | .uuid'); do
                 rw_api DELETE "/api/hosts/$h" >/dev/null
             done
-            rw_api DELETE "/api/config-profiles/$puuid" >/dev/null && ok "Профиль «$pname» и его хосты удалены"
+            rw_api DELETE "/api/config-profiles/$puuid" >/dev/null && ok "Профиль «${pname}» и его хосты удалены"
         elif [[ -n "$pname" ]]; then
-            info "Профиль «$pname» оставлен: $([[ "$pname" != f2d-* ]] && echo "его создал не fail2detect" || echo "им пользуются другие ноды")"
+            info "Профиль «${pname}» оставлен: $([[ "$pname" != f2d-* ]] && echo "его создал не fail2detect" || echo "им пользуются другие ноды")"
         fi
     done < <(jq -c '.[]' <<<"$nodes")
     audit_write REMOVE - panel - "нода $me удалена из панели"

@@ -595,7 +595,7 @@ node_add_api() {   # name address country host_address
         hf=$(host_fields "$inb" "$haddr")
         r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$u" --arg rem "$name · $label" \
             '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
-        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$name · $label»"; else warn "Хост «$name · $label» не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$name · ${label}»"; else warn "Хост «$name · ${label}» не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
         squad_add_inbound "$u" >/dev/null
     done < <(jq -c '.[]' <<<"$inbs")
     ok "Inbound'ы добавлены в squad (пользователи их получат)"

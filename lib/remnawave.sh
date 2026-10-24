@@ -243,11 +243,11 @@ node_port_change() {   # new_port [tag]
     while IFS=$'\t' read -r hu hr hp _; do
         [[ -z "$hu" || "$hp" != "$old" ]] && continue
         r=$(rw_api PATCH /api/hosts "$(jq -n --arg u "$hu" --argjson p "$new" '{uuid:$u, port:$p}')")
-        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$hr»: порт $new"; else warn "Хост «$hr» не обновлён: $r"; fi
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «${hr}»: порт $new"; else warn "Хост «${hr}» не обновлён: $r"; fi
     done <<<"$hosts"
 
     if has_node; then
-        info "Жду, пока Xray поднимется на $new/$l4…"
+        info "Жду, пока Xray поднимется на $new/${l4}…"
         if node_wait_port "$new" "$l4"; then ok "Xray слушает $new/$l4"
         else warn "Xray пока не слушает $new — проверьте ноду в панели (Ноды → статус)"; fi
         if [[ " $(detect_ssh_ports) " != *" $old "* ]] && confirm "Закрыть старый порт $old/$l4?" y; then
@@ -335,11 +335,11 @@ node_transport_change() {   # [tag]
         hf=$(host_fields "$new" "$ha")
         r=$(rw_api PATCH /api/hosts "$(jq -n --arg u "$hu" --argjson h "$hf" --arg p "$puuid" --arg i "$iuuid" \
             '$h + {uuid:$u, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}}')")
-        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$hr» обновлён"; else warn "Хост «$hr»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «${hr}» обновлён"; else warn "Хост «${hr}»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
     done < <(rw_api GET /api/hosts | jq -r --arg a "$SEL_IUUID" --arg b "$iuuid" '.response[] | select(.inbound.configProfileInboundUuid == $a or .inbound.configProfileInboundUuid == $b) | [.uuid, .remark, (.port|tostring), .address] | @tsv')
 
     if [[ "$here" == yes ]]; then
-        info "Жду, пока Xray поднимется на $T_PORT/$nl4…"
+        info "Жду, пока Xray поднимется на $T_PORT/${nl4}…"
         node_wait_port "$T_PORT" "$nl4" && ok "Xray слушает $T_PORT/$nl4" || warn "Xray пока не слушает — смотрите статус ноды в панели и docker logs remnanode"
     fi
     audit_write NODE_TRANSPORT - "$tag" - "$ot:$oport → $T_TRANSPORT:$T_PORT"
@@ -361,7 +361,7 @@ node_transport_add() {   # [tag-образца]
     opriv=$(jq -r '.streamSettings.realitySettings.privateKey // ""' <<<"$ref")
     osid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<<"$ref")
     [[ "$otarget" == "$NGINX_SOCK" ]] && otarget=""
-    title "Запасные транспорты для профиля «$pname» (сейчас: $(transport_label "$ot") :$SEL_PORT)"
+    title "Запасные транспорты для профиля «${pname}» (сейчас: $(transport_label "$ot") :$SEL_PORT)"
 
     # занятые в профиле порты, чтобы не предложить конфликт
     local busy; busy=$(rw_api GET "/api/config-profiles/$puuid" | jq -r '.response.config.inbounds[] | "\(.port)/\(if .protocol == "hysteria" then "udp" else "tcp" end)"')
@@ -423,7 +423,7 @@ node_transport_add() {   # [tag-образца]
         hf=$(host_fields "$inb" "$raddr")
         r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$u" --arg rem "$rrem · $label" \
             '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
-        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$rrem · $label»"; else warn "Хост «$rrem · $label»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$rrem · ${label}»"; else warn "Хост «$rrem · ${label}»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
         squad_link_like "$u" "$ruuid"
     done < <(jq -c '.[]' <<<"$inbs")
 

@@ -247,7 +247,7 @@ node_prepare() {
         local rc=0; node_compose_add_certs || rc=$?
         (( rc == 2 )) && die "Добавьте в $d/docker-compose.yml в volumes сервиса remnanode: - ./certs:$XRAY_CERT_DIR:ro"
         if (( rc == 0 )) || ! node_certs_visible; then
-            info "Пересоздаю контейнер ноды, чтобы подключить $XRAY_CERT_DIR…"
+            info "Пересоздаю контейнер ноды, чтобы подключить ${XRAY_CERT_DIR}…"
             (cd "$d" && docker compose up -d --force-recreate remnanode >/dev/null 2>&1) || die "docker compose не пересоздал remnanode"
             local i; for i in $(seq 1 15); do node_certs_visible && break; sleep 1; done
         fi
