@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave installer setup ipquality geocheck speedtest; do
+for _m in common detect firewall jail transport certs web remnawave installer remove setup ipquality geocheck speedtest; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -33,6 +33,8 @@ ${C_BOLD}Установка Remnawave${C_RESET}
   install node [опции]      нода: авто (всё создаёт в панели через API) или вручную (SECRET_KEY);
                             один или несколько транспортов (запасные — если основной глушат)
   install sub               страница подписки
+  reinstall node|panel      переустановить (удалить с резервной копией и поставить заново)
+  remove node|panel         удалить ноду или панель (архив + дамп базы в /var/lib/fail2detect/backup)
 
 ${C_BOLD}Баны и журнал${C_RESET}
   bans                      активные баны
@@ -261,14 +263,19 @@ menu_node() {
 
 menu_install() {
     banner
-    echo "  ${C_BOLD}Установка${C_RESET}"
+    echo "  ${C_BOLD}Установка, переустановка, удаление${C_RESET}"
     menu_item 1 "Панель (+ подписка, + нода на этом сервере)"
     menu_item 2 "Нода (порт и транспорт на выбор)"
     menu_item 3 "Страница подписки"
+    menu_item 4 "Переустановить ноду"
+    menu_item 5 "Удалить ноду"
+    menu_item 6 "Переустановить панель"
+    menu_item 7 "Удалить панель"
     menu_item 0 "Назад"
     ask "Выбор" ""
     case "$REPLY" in
         1) install_panel;; 2) install_node;; 3) install_sub;;
+        4) reinstall_node;; 5) remove_node;; 6) reinstall_panel;; 7) remove_panel;;
         *) return;;
     esac
     pause
@@ -327,6 +334,8 @@ main() {
                         *) die "web apply|show|url";;
                     esac;;
         acme)       require_root; acme_hook "${1:?pre|post|deploy}";;
+        remove)     remove_cli "$@";;
+        reinstall)  reinstall_cli "$@";;
         cert|certs) cert_cli "$@";;
         daemon)     daemon_run;;
         bans)       ban_list;;

@@ -269,10 +269,12 @@ node_prepare() {
 
     # фаервол
     list_add "PUBLIC_$( [[ $l4 == udp ]] && echo UDP || echo TCP )" "$port"
+    list_add NODE_XRAY_PORTS "$port/$l4"   # чтобы при удалении ноды закрыть именно их
     ufw_allow "$port" "$l4" "" "Xray $t"
     if [[ -n "$old" && "$old" != "$port/$l4" ]]; then
         local op="${old%/*}" ol="${old#*/}"
         if [[ " $(detect_ssh_ports) " != *" $op "* ]]; then
+            list_del NODE_XRAY_PORTS "$old"
             list_del "PUBLIC_$( [[ $ol == udp ]] && echo UDP || echo TCP )" "$op"
             ufw_delete_allow "$op" "$ol"
             info "Старый порт $op/$ol закрыт"

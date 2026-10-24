@@ -86,7 +86,12 @@ panel_bootstrap() {
 
 install_panel() {
     require_root; ensure_deps; ensure_dirs; require_docker; load_config
-    has_panel && die "Панель уже установлена в $RW_PANEL_DIR"
+    if has_panel; then
+        warn "Панель уже установлена в $RW_PANEL_DIR."
+        confirm "Переустановить (удалить с резервной копией и поставить заново)?" n || return 1
+        remove_panel --reinstall || return 1
+        load_config
+    fi
     title "Установка панели Remnawave"
     ask_domain "Домен панели (A-запись на этот сервер)"; local pdomain="$REPLY"
     local sdomain=""
@@ -104,8 +109,35 @@ install_panel() {
     mkdir -p "$RW_PANEL_DIR"; cd "$RW_PANEL_DIR" || return 1
     curl -fsSL "$RW_RAW_BACKEND/docker-compose-prod.yml" -o docker-compose.yml || die "Не скачался docker-compose панели"
     curl -fsSL "$RW_RAW_BACKEND/.env.sample" -o .env || die "Не скачался .env панели"
+    # том с базой от прошлой установки: новый пароль к нему не подойдёт
+    local reuse=no
+    if docker volume inspect remnawave-db-data >/dev/null 2>&1; then
+        # архивы именуются remnawave-ГГГГММДД-ЧЧММСС.tgz — последний по имени и есть свежий
+        local last="" f; for f in "$F2D_BACKUP_DIR"/remnawave-2*.tgz; do [[ -f "$f" ]] && last="$f"; done
+        warn "Найдена база от прошлой установки (docker-том remnawave-db-data)."
+        echo "  1. Использовать её — пользователи и подписки сохранятся (пароли возьму из архива${last:+ $last})"
+        echo "  2. Удалить её и начать с чистой базы"
+        ask "Вариант" "1"
+        if [[ "$REPLY" == 2 ]]; then
+            ask "Чтобы удалить базу, введите «удалить»" ""
+            [[ "$REPLY" == удалить ]] || die "Отменено"
+            docker volume rm remnawave-db-data >/dev/null && ok "Старая база удалена"
+        else
+            [[ -n "$last" ]] || die "Нет архива с паролями старой базы. Удалите том (docker volume rm remnawave-db-data) или положите прежний .env в $RW_PANEL_DIR"
+            local old; old=$(tar -xzOf "$last" remnawave/.env 2>/dev/null) || die "В архиве $last нет .env"
+            local key val
+            for key in APP_SECRET POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL METRICS_USER METRICS_PASS WEBHOOK_SECRET_HEADER; do
+                val=$(grep -m1 "^$key=" <<<"$old" | cut -d= -f2-) || continue
+                [[ -n "$val" ]] && { grep -v "^$key=" .env > .env.new; printf '%s=%s\n' "$key" "$val" >> .env.new; mv .env.new .env; }
+            done
+            reuse=yes; ok "Пароли и секреты старой установки восстановлены из $last"
+        fi
+    fi
     local dbpass; dbpass=$(rand_alnum 32)
-    sed -i \
+    [[ "$reuse" == yes ]] && sed -i \
+        -e "s|^PANEL_DOMAIN=.*|PANEL_DOMAIN=$pdomain|" \
+        -e "s|^SUB_PUBLIC_DOMAIN=.*|SUB_PUBLIC_DOMAIN=${sdomain:-$pdomain/api/sub}|" .env
+    [[ "$reuse" == yes ]] || sed -i \
         -e "s|^APP_SECRET=.*|APP_SECRET=$(rand_alnum 64)|" \
         -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$dbpass|" \
         -e "s|^DATABASE_URL=.*|DATABASE_URL=\"postgresql://postgres:${dbpass}@remnawave-db:5432/postgres\"|" \
@@ -119,7 +151,14 @@ install_panel() {
     docker compose up -d >/dev/null 2>&1 || die "docker compose up не удался (см. docker compose logs в $RW_PANEL_DIR)"
     panel_wait_api || die "Панель не отвечает на 127.0.0.1:3000 (docker compose logs -f remnawave)"
     ok "Панель запущена"
-    panel_bootstrap || return 1
+    if [[ "$reuse" == yes ]]; then
+        info "База прежняя — администратор и API-токены тоже. Нужен API-токен панели."
+        config_set RW_API_URL "http://127.0.0.1:3000"
+        rw_setup_interactive || warn "Без токена не получится создать ноду и страницу подписки автоматически"
+        PANEL_ADMIN_USER="(прежний)"; PANEL_ADMIN_PASS="(прежний)"
+    else
+        panel_bootstrap || return 1
+    fi
 
     # nginx: если нода будет здесь же на 443 через Reality — панель доступна
     # через неё (selfsteal-сокет), иначе nginx сам слушает 443
@@ -397,7 +436,12 @@ install_node() {
     [[ -n "$one_t" ]] && targ="$one_t:${one_p:-$(transport_default_port "$one_t")}"
 
     case "$(node_install_state)" in
-        installed) die "Нода уже установлена. Сменить транспорт: fail2detect node transport; добавить запасной: fail2detect node add-transport";;
+        installed)
+            warn "Нода уже установлена ($(node_dir))."
+            echo "  Сменить транспорт: fail2detect node transport · добавить запасной: fail2detect node add-transport"
+            confirm "Переустановить ноду (удалить с резервной копией и поставить заново)?" n || return 1
+            remove_node --reinstall || return 1
+            load_config;;
         unfinished)
             warn "Найдена незавершённая установка ноды ($RW_NODE_DIR, контейнер не создан)."
             confirm "Начать установку заново (файлы ноды будут перезаписаны)?" y || return 1;;

@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave installer setup ipquality; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave installer remove setup ipquality; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -153,6 +153,11 @@ read -r t _ <<<"$(usage_ru "ISP/MOB")"; [[ "$t" == Мобильный ]] && pass
 ABUSEIPDB_KEY=""; G=(); gc_parse "$WORK/ipq" 78.135.77.114; [[ "${G[abuseipdb.asntype]}" == nokey ]] && pass "без ключа AbuseIPDB — пометка «нужен ключ»" || fail "без ключа"
 unset G
 
+section "Удаление: защита от лишнего"
+for bad in / /etc /opt /root /home "$WORK"; do
+    _safe_rmdir "$bad" 2>/dev/null && fail "_safe_rmdir согласился удалить $bad" || pass "_safe_rmdir отказал: $bad"
+done
+
 section "Адрес API панели"
 [[ "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')" == $'https://panel.example.com\tzDXqulmc=ZAKdtFMm' ]] \
     && pass "ссылка входа → адрес + cookie" || fail "ссылка входа" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"
@@ -246,6 +251,26 @@ else
     nft list set inet fail2detect pub_tcp | grep -q 9999 && pass "новый порт применён" || fail "новый порт применён"
     fw_rollback >/dev/null 2>&1
     nft list set inet fail2detect pub_tcp | grep -q 9999 && fail "откат" "порт 9999 остался" || pass "откат вернул прежние правила"
+
+    section "Удаление ноды"
+    fw_apply >/dev/null
+    mkdir -p /opt/remnanode/certs; cp "$ROOT/tests/fixtures/compose-caddy.yml" /opt/remnanode/docker-compose.yml
+    docker() { echo "docker $*" >> "$WORK/docker.log"; }
+    detect_xray_ports() { echo 443; }; detect_xray_udp_ports() { echo 443; }
+    node_dir() { [[ -f /opt/remnanode/docker-compose.yml ]] && echo /opt/remnanode; }
+    STUB_PANEL=no; PUBLIC_TCP="443 8443"; PUBLIC_UDP="443"; NODE_XRAY_PORTS="443/tcp 443/udp 8443/tcp"
+    config_set PUBLIC_TCP "443 8443"; config_set PUBLIC_UDP "443"; config_set NODE_XRAY_PORTS "443/tcp 443/udp 8443/tcp"
+    printf 'y\nn\n' | remove_node >/dev/null 2>&1
+    [[ ! -d /opt/remnanode ]] && pass "каталог ноды удалён" || fail "каталог ноды остался"
+    ls "$F2D_STATE_DIR"/backup/remnanode-*.tgz >/dev/null 2>&1 && pass "архив ноды создан" || fail "архив ноды"
+    bk=""; for f in "$F2D_STATE_DIR"/backup/remnanode-*.tgz; do bk="$f"; done
+    tar -tzf "$bk" | grep -q 'remnanode/docker-compose.yml' && pass "в архиве есть docker-compose.yml" || fail "содержимое архива"
+    grep -q 'compose down' "$WORK/docker.log" && pass "контейнеры остановлены (docker compose down)" || fail "docker compose down не вызван"
+    load_config
+    [[ -z "$NODE_XRAY_PORTS" && " $PUBLIC_TCP " != *" 8443 "* && " $PUBLIC_UDP " != *" 443 "* ]] && pass "порты ноды закрыты" || fail "порты ноды" "tcp=$PUBLIC_TCP udp=$PUBLIC_UDP xray=$NODE_XRAY_PORTS"
+    nft list set inet fail2detect pub_tcp | grep -q 2233 && pass "SSH-порт остался открыт" || fail "SSH-порт закрылся"
+    unset -f docker detect_xray_ports detect_xray_udp_ports
+
     check "fw_disable удаляет таблицу" bash -c "nft delete table inet fail2detect && ! nft list table inet fail2detect"
 fi
 
