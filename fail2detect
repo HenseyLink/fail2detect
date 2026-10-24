@@ -17,6 +17,12 @@ unset _m
 
 load_config
 
+# короткая команда f2d: создаём сами, если её нет (установщик мог быть
+# взят из кэша GitHub до её появления). Чужой f2d не трогаем.
+if [[ $EUID -eq 0 && -d /usr/local/bin && ! -e /usr/local/bin/f2d && ! -L /usr/local/bin/f2d ]]; then
+    ln -s "$F2D_BIN" /usr/local/bin/f2d 2>/dev/null || true
+fi
+
 usage() {
     cat <<EOF
 ${C_BOLD}fail2detect $F2D_VERSION${C_RESET} — защита нод и панели Remnawave
