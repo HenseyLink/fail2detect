@@ -57,7 +57,7 @@ setup_wizard() {
     print_env_summary
 
     if has_panel || has_node; then
-        rw_setup_interactive
+        rw_setup_interactive || true
         load_config
     fi
 

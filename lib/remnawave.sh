@@ -112,7 +112,7 @@ rw_setup_interactive() {
         echo "  Вставьте адрес панели (https://panel.example.com) или, если панель ставил"
         echo "  установщик с секретным ключом, ссылку входа ЦЕЛИКОМ — с ?ключом=значением на конце."
         ask "Панель (пусто — пропустить)" "$cur"
-        [[ -z "$REPLY" ]] && { info "Пропущено. Позже: fail2detect config RW_API_URL <ссылка>"; return 0; }
+        [[ -z "$REPLY" ]] && { info "Пропущено. Позже: fail2detect config RW_API_URL <ссылка>"; return 1; }
         [[ "$REPLY" =~ ^https?:// ]] || REPLY="https://$REPLY"
         config_set RW_API_URL "$REPLY"; rw_normalize_url
         [[ -n "${RW_API_COOKIE:-}" ]] && ok "Ключ входа сохранён (RW_API_COOKIE)"
@@ -122,7 +122,7 @@ rw_setup_interactive() {
     for try in 1 2 3; do
         if [[ "$need_token" == yes ]]; then
             local t; read_secret "API-токен панели (вставьте; пусто — пропустить)"; t="$REPLY"
-            [[ -z "$t" ]] && { info "Пропущено. Позже: fail2detect config RW_API_TOKEN <токен>"; return 0; }
+            [[ -z "$t" ]] && { info "Пропущено. Позже: fail2detect config RW_API_TOKEN <токен>"; return 1; }
             install -m 600 /dev/null "$RW_TOKEN_FILE"; printf '%s' "$t" > "$RW_TOKEN_FILE"
             config_set RW_API_TOKEN ""; RW_API_TOKEN=""; _RW_TOKEN=""
         fi
@@ -143,6 +143,7 @@ rw_setup_interactive() {
         confirm "Попробовать ещё раз?" y || break
     done
     warn "Панель не подключена — fail2detect работает и без неё (кроме смены порта/транспорта)."
+    return 1
 }
 
 rw_api_ok() {   # проверка доступа к API
@@ -151,18 +152,24 @@ rw_api_ok() {   # проверка доступа к API
 }
 
 rw_need_api() {
-    if [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; then
-        warn "Панели на этом сервере нет."
-        ask "Адрес панели или ссылка входа целиком" ""
-        [[ -n "$REPLY" ]] || return 1
-        config_set RW_API_URL "$REPLY"; rw_normalize_url
-        if [[ -z "${RW_API_COOKIE:-}" ]]; then
-            info "Если панель закрыта ключом входа, укажите его: name=value из ссылки входа"
-            ask "Cookie (пусто — пропустить)" ""
-            [[ -n "$REPLY" ]] && config_set RW_API_COOKIE "$REPLY"
-        fi
+    # Адрес и токен спрашиваем ЯВНО и заранее: дальше API зовётся в $(…) с
+    # заглушённым stderr, и скрытый вопрос о токене выглядел как зависание.
+    if { [[ "$RW_API_URL" == http://127.0.0.1:3000 ]] && ! has_panel; } || ! F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1; then
+        [[ -t 0 ]] || { err "Панель не настроена: fail2detect setup или fail2detect config RW_API_URL/RW_API_TOKEN"; return 1; }
+        rw_setup_interactive || return 1
+        load_config; _RW_TOKEN=""
+        return 0
     fi
-    rw_api_ok || { err "API панели недоступно по $RW_API_URL (проверьте токен/адрес)"; rm -f "$RW_TOKEN_FILE"; return 1; }
+    local code
+    IFS='|' read -r code _ <<<"$(rw_probe)"
+    [[ "$code" == 200 ]] && return 0
+    err "API панели: $(rw_probe_explain "$code")"
+    if [[ -t 0 ]] && confirm "Ввести адрес/токен панели заново?" y; then
+        rw_setup_interactive || return 1
+        load_config; _RW_TOKEN=""
+        return 0
+    fi
+    return 1
 }
 
 # таблица inbound'ов: profile_uuid inbound_uuid tag port profile_name
@@ -337,6 +344,109 @@ node_transport_change() {   # [tag]
     fi
     audit_write NODE_TRANSPORT - "$tag" - "$ot:$oport → $T_TRANSPORT:$T_PORT"
     warn "Клиентам нужно обновить подписку."
+}
+
+# ---------- запасные транспорты к работающей ноде ----------
+# Берём существующий inbound как образец (домен, ключи Reality, адрес хоста),
+# добавляем в тот же профиль новые inbound'ы и по хосту на каждый, включаем
+# их у нод с этим профилем и в тех же squad'ах. Старый транспорт не трогаем.
+node_transport_add() {   # [tag-образца]
+    require_root; rw_need_api || return 1
+    rw_pick_inbound "${1:-}" "Номер inbound'а ноды, к которой добавить транспорт"
+    local puuid="$SEL_PUUID" ruuid="$SEL_IUUID" rtag="$SEL_TAG" pname="$SEL_PNAME"
+    local ref ot odomain otarget opriv osid
+    ref=$(rw_inbound_json "$puuid" "$rtag"); ot=$(transport_of_inbound <<<"$ref")
+    odomain=$(jq -r '.streamSettings | (.realitySettings.serverNames[0] // .tlsSettings.serverName // "")' <<<"$ref")
+    otarget=$(jq -r '.streamSettings.realitySettings | (.target // .dest // "")' <<<"$ref")
+    opriv=$(jq -r '.streamSettings.realitySettings.privateKey // ""' <<<"$ref")
+    osid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<<"$ref")
+    [[ "$otarget" == "$NGINX_SOCK" ]] && otarget=""
+    title "Запасные транспорты для профиля «$pname» (сейчас: $(transport_label "$ot") :$SEL_PORT)"
+
+    # занятые в профиле порты, чтобы не предложить конфликт
+    local busy; busy=$(rw_api GET "/api/config-profiles/$puuid" | jq -r '.response.config.inbounds[] | "\(.port)/\(if .protocol == "hysteria" then "udp" else "tcp" end)"')
+    local here=no
+    if has_node && confirm "Нода с этим профилем работает на этом сервере?" y; then here=yes; fi
+    [[ "$here" == yes ]] || ASK_PORT_NOCHECK=1
+    ask_transports "$odomain"
+    unset ASK_PORT_NOCHECK
+    [[ -n "$otarget" && -z "$T_TARGET" ]] && T_TARGET="$otarget"
+    local t
+    for t in "${T_LIST[@]}"; do
+        grep -qx "${T_PORTS[$t]}/$(transport_l4 "$t")" <<<"$busy" && die "${T_PORTS[$t]}/$(transport_l4 "$t") уже занят в этом профиле — выберите другой порт"
+    done
+    confirm "Добавить: $(for t in "${T_LIST[@]}"; do printf '%s %s/%s  ' "$(transport_label "$t")" "${T_PORTS[$t]}" "$(transport_l4 "$t")"; done)?" y || return 1
+
+    # 1) нода: сертификат, сайт, фаервол — до того, как Xray получит конфиг
+    if [[ "$here" == yes ]]; then
+        node_prepare_all || return 1
+    else
+        warn "Сначала подготовьте ноду. На её сервере выполните:"
+        for t in "${T_LIST[@]}"; do
+            printf '    fail2detect node prepare --transport %s --port %s' "$t" "${T_PORTS[$t]}"
+            [[ -n "$T_DOMAIN" ]] && printf ' --domain %s' "$T_DOMAIN"
+            [[ -n "$T_TARGET" ]] && transport_reality "$t" && printf ' --target %s' "$T_TARGET"
+            echo
+        done
+        confirm "Нода подготовлена?" n || { info "Отменено, панель не изменена"; return 1; }
+    fi
+
+    # 2) профиль: + новые inbound'ы (ключи Reality — как у образца)
+    local prefix inbs cfg r
+    prefix=$(tag_prefix "${rtag%%_*}")
+    inbs=$(build_inbounds "$prefix" "$opriv" "$osid") || return 1
+    cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --argjson n "$inbs" '.response.config | .inbounds += $n')
+    r=$(rw_api PATCH /api/config-profiles "$(jq -n --arg u "$puuid" --argjson c "$cfg" '{uuid:$u, config:$c}')")
+    jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
+    ok "Профиль обновлён"
+    local -A uuid_of=(); local tag u
+    while IFS=$'\t' read -r tag u; do uuid_of[$tag]="$u"; done < <(jq -r '.response.inbounds[] | [.tag, .uuid] | @tsv' <<<"$r")
+    local added=(); while read -r tag; do [[ -n "${uuid_of[$tag]:-}" ]] && added+=("${uuid_of[$tag]}"); done < <(jq -r '.[].tag' <<<"$inbs")
+    local newj; newj=$(printf '%s\n' "${added[@]}" | jq -R . | jq -sc .)
+
+    # 3) ноды с этим профилем и образцом — включить новые inbound'ы
+    local nu ai
+    while IFS=$'\t' read -r nu ai; do
+        rw_api PATCH /api/nodes "$(jq -n --arg u "$nu" --arg p "$puuid" --argjson a "$ai" --argjson n "$newj" \
+            '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:(($a + $n) | unique)}}')" >/dev/null && ok "Нода $nu: транспорты включены"
+    done < <(rw_api GET /api/nodes | jq -r --arg o "$ruuid" '.response[] | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv')
+
+    # 4) хосты по образцу: тот же адрес, имя «<имя образца> · <транспорт>»
+    local rhost raddr rrem inb hf label
+    rhost=$(rw_hosts_of "$ruuid" | head -1)
+    IFS=$'\t' read -r _ rrem _ raddr <<<"$rhost"
+    rrem="${rrem% · *}"; [[ -n "$rrem" ]] || rrem="$pname"
+    [[ -n "$raddr" ]] || raddr="${T_DOMAIN:-$(public_ip)}"
+    while read -r inb; do
+        tag=$(jq -r .tag <<<"$inb"); u="${uuid_of[$tag]:-}"; [[ -n "$u" ]] || continue
+        label=$(transport_label "$(transport_of_inbound <<<"$inb")")
+        hf=$(host_fields "$inb" "$raddr")
+        r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$u" --arg rem "$rrem · $label" \
+            '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$rrem · $label»"; else warn "Хост «$rrem · $label»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+        squad_link_like "$u" "$ruuid"
+    done < <(jq -c '.[]' <<<"$inbs")
+
+    if [[ "$here" == yes ]]; then
+        for t in "${T_LIST[@]}"; do
+            node_wait_port "${T_PORTS[$t]}" "$(transport_l4 "$t")" && ok "$(transport_label "$t"): слушает ${T_PORTS[$t]}/$(transport_l4 "$t")" \
+                || warn "$(transport_label "$t"): ${T_PORTS[$t]}/$(transport_l4 "$t") пока не слушается — docker logs remnanode"
+        done
+    fi
+    audit_write NODE_TRANSPORT_ADD - "$rtag" - "$(transports_arg)"
+    warn "Клиентам нужно обновить подписку, чтобы получить новые транспорты."
+}
+
+# добавить inbound во все squad'ы, где есть образец (ничего не удаляя)
+squad_link_like() {   # new_uuid ref_uuid
+    local sq u cur
+    sq=$(rw_api GET /api/internal-squads | jq -c '.response.internalSquads // []')
+    while read -r u; do
+        [[ -n "$u" ]] || continue
+        cur=$(jq -c --arg u "$u" '.[] | select(.uuid == $u) | [.inbounds[]? | (.uuid // .)]' <<<"$sq")
+        jq -e --arg o "$2" 'index($o)' <<<"$cur" >/dev/null || continue
+        rw_api PATCH /api/internal-squads "$(jq -n --arg u "$u" --argjson i "$(jq -c --arg n "$1" '. + [$n] | unique' <<<"$cur")" '{uuid:$u, inbounds:$i}')" >/dev/null
+    done < <(jq -r '.[].uuid' <<<"$sq")
 }
 
 # подготовка ноды из CLI: fail2detect node prepare --transport T --port P [--domain D] [--target T] [--close P/proto]

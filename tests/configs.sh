@@ -36,13 +36,25 @@ for t in "${TRANSPORTS[@]}"; do
         else .settings.clients = [{id:$id, email:"1"} + (if .streamSettings.network == "raw" then {flow:"xtls-rprx-vision"} else {} end)] end' <<<"$inb")
     profile_config "$inb" > "$WORK/$t.json"
     # от имени владельца файлов: образ Xray не root, а ключ — 600 (remnanode же работает от root)
-    if out=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/$t.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" -v /dev/shm:/dev/shm \
+    if res=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/$t.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" -v /dev/shm:/dev/shm \
             "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
         pass "xray: $t"
     else
-        fail "xray: $t" "$(tail -5 <<<"$out")"
+        fail "xray: $t" "$(tail -5 <<<"$res")"
     fi
 done
+# набор транспортов в одном профиле (443/tcp и 443/udp одновременно, общий ключ Reality)
+source "$ROOT/lib/installer.sh"
+parse_transports_arg "tcp-reality:443,hysteria2:443,grpc-reality:8443,xhttp-reality:4443,xhttp-tls:2083,grpc-tls:2087"
+T_DOMAIN=node.example.com; T_TARGET=""; T_OBFS="testpassword"
+inbs=$(build_inbounds SET | jq --arg id "$uuid" 'map(if .protocol == "hysteria" then .settings.clients = [{id:$id, auth:$id, email:"1"}]
+    else .settings.clients = [{id:$id, email:"1"} + (if .streamSettings.network == "raw" then {flow:"xtls-rprx-vision"} else {} end)] end)')
+profile_config "$inbs" > "$WORK/set.json"
+if res=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/set.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
+    pass "xray: 6 транспортов в одном профиле"
+else
+    fail "xray: 6 транспортов в одном профиле" "$(tail -5 <<<"$res")"
+fi
 # чужой target для Reality
 inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443" | jq --arg id "$uuid" '.settings.clients=[{id:$id, flow:"xtls-rprx-vision"}]')
 profile_config "$inb" > "$WORK/ext.json"
@@ -55,9 +67,9 @@ for d in panel.example.com sub.example.com node.example.com; do mkcert "$LE/$d" 
 cert_dir() { echo "/etc/letsencrypt/live/$1"; }
 check_nginx() {   # name
     web_render > "$WORK/nginx.conf"
-    if out=$(docker run --rm -v "$WORK/nginx.conf:/etc/nginx/conf.d/default.conf:ro" -v "$WORK/le:/etc/letsencrypt:ro" \
+    if res=$(docker run --rm -v "$WORK/nginx.conf:/etc/nginx/conf.d/default.conf:ro" -v "$WORK/le:/etc/letsencrypt:ro" \
             "$NGINX_IMAGE" nginx -t 2>&1); then pass "nginx: $1"
-    else fail "nginx: $1" "$(grep -E 'emerg|error' <<<"$out" | head -3)"; fi
+    else fail "nginx: $1" "$(grep -E 'emerg|error' <<<"$res" | head -3)"; fi
 }
 web_set PANEL_DOMAIN panel.example.com; web_set PANEL_KEY_NAME abcdefgh; web_set PANEL_KEY_VALUE Secret123
 web_set WEB_PORT 443

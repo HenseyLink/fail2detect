@@ -32,6 +32,20 @@ transport_title() {
     esac
 }
 transport_valid()   { [[ " ${TRANSPORTS[*]} " == *" $1 "* ]]; }
+# короткое имя для хоста в подписке: «Нода · Reality», «Нода · Hysteria2»
+transport_label() {
+    case "$1" in
+        tcp-reality) echo "Reality";; xhttp-reality) echo "XHTTP";; xhttp-tls) echo "XHTTP TLS";;
+        grpc-reality) echo "gRPC";; grpc-tls) echo "gRPC TLS";; hysteria2) echo "Hysteria2";; *) echo "$1";;
+    esac
+}
+# порт по умолчанию — разные, чтобы транспорты уживались на одной ноде
+transport_default_port() {
+    case "$1" in
+        tcp-reality|hysteria2) echo 443;; grpc-reality) echo 8443;; xhttp-reality) echo 4443;;
+        xhttp-tls) echo 2083;; grpc-tls) echo 2087;; *) echo 443;;
+    esac
+}
 transport_l4()      { [[ "$1" == hysteria2 ]] && echo udp || echo tcp; }
 transport_reality() { [[ "$1" == *-reality ]]; }
 transport_tls()     { [[ "$1" == *-tls || "$1" == hysteria2 ]]; }
@@ -149,10 +163,10 @@ host_fields() {   # inbound_json address
 }
 
 # базовый конфиг Xray для нового профиля
-profile_config() {   # inbound_json
+profile_config() {   # inbound_json или [inbound, …]
     jq -n --argjson i "$1" '{
         log: { loglevel: "warning" },
-        inbounds: [$i],
+        inbounds: (if ($i | type) == "array" then $i else [$i] end),
         outbounds: [
             { tag: "DIRECT", protocol: "freedom" },
             { tag: "BLOCK", protocol: "blackhole" }

@@ -39,14 +39,20 @@ hr()    { printf '%s%s%s\n' "$C_GRAY" "$(printf '─%.0s' $(seq 1 "${1:-60}"))" 
 title() { printf '\n%s%s%s\n' "$C_BOLD$C_MAGENTA" "$*" "$C_RESET"; hr; }
 
 # ask "Вопрос" [default] -> REPLY
+# Вопрос с редактированием строки: стрелки, Backspace, Home/End (readline).
+# Цветной префикс печатаем сами — readline неверно считает ширину ANSI-кодов.
 ask() {
-    local prompt="$1" def="${2:-}"
+    local prompt="$1" def="${2:-}" e=()
+    [[ -t 0 ]] && e=(-e)
     if [[ -n "$def" ]]; then
-        read -r -p "$(printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GRAY" "$def" "$C_RESET")" REPLY
+        printf '%s?%s %s %s[%s]%s: ' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GRAY" "$def" "$C_RESET" >&2
+        IFS= read -r "${e[@]}" REPLY || REPLY=""
         REPLY="${REPLY:-$def}"
     else
-        read -r -p "$(printf '%s?%s %s: ' "$C_YELLOW" "$C_RESET" "$prompt")" REPLY
+        printf '%s?%s %s: ' "$C_YELLOW" "$C_RESET" "$prompt" >&2
+        IFS= read -r "${e[@]}" REPLY || REPLY=""
     fi
+    REPLY="${REPLY#"${REPLY%%[![:space:]]*}"}"; REPLY="${REPLY%"${REPLY##*[![:space:]]}"}"   # обрезать пробелы
 }
 
 # confirm "Вопрос" [y|n] — 0 если да

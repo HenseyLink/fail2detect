@@ -30,7 +30,8 @@ ${C_BOLD}Настройка${C_RESET}
 
 ${C_BOLD}Установка Remnawave${C_RESET}
   install panel             панель (+ подписка, + нода на этом же сервере)
-  install node [опции]      нода с выбором порта и транспорта
+  install node [опции]      нода: авто (всё создаёт в панели через API) или вручную (SECRET_KEY);
+                            один или несколько транспортов (запасные — если основной глушат)
   install sub               страница подписки
 
 ${C_BOLD}Баны и журнал${C_RESET}
@@ -54,6 +55,7 @@ ${C_BOLD}Jail'ы${C_RESET}
 ${C_BOLD}Нода Remnawave${C_RESET}
   node add                  создать ноду в панели (профиль + хост + squad), выдаст команду для ноды
   node transport [tag]      сменить транспорт и/или порт у работающей ноды
+  node add-transport [tag]  добавить к ноде запасные транспорты (например Hysteria2 + gRPC + XHTTP)
   node port <порт> [tag]    только перенести Xray-inbound на другой порт
   node prepare --transport T --port P [--domain D] [--target host:port] [--close P/proto]
                             подготовить сервер ноды к транспорту (сертификат, сайт, фаервол)
@@ -240,6 +242,7 @@ menu_node() {
         menu_item 4 "Добавить ноду в панель"
         menu_item 5 "Сменить API-порт ноды (NODE_PORT)"
         menu_item 6 "Включить лог Xray (jail reality)"
+        menu_item 7 "Добавить запасные транспорты к ноде"
         menu_item 0 "Назад"
         ask "Выбор" ""
         case "$REPLY" in
@@ -249,6 +252,7 @@ menu_node() {
             4) node_add;;
             5) ask "Новый NODE_PORT"; node_api_port_change "$REPLY";;
             6) node_logs_enable;;
+            7) node_transport_add;;
             0|q|"") return;;
         esac
         pause
@@ -360,13 +364,14 @@ main() {
                     case "${1:-}" in
                         add) node_add "${2:-}";;
                         transport) node_transport_change "${2:-}";;
+                        add-transport) node_transport_add "${2:-}";;
                         prepare) shift; node_prepare_cli "$@";;
                         inbound-json) node_inbound_json "${2:-}" "${3:-443}" "${4:-}" "${5:-}";;
                         port) node_port_change "${2:?порт}" "${3:-}";;
                         api-port) node_api_port_change "${2:?порт}";;
                         inbounds) rw_show_inbounds;;
                         logs) node_logs_enable;;
-                        *) die "node add|transport|port|prepare|inbound-json|api-port|inbounds|logs";;
+                        *) die "node add|transport|add-transport|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;

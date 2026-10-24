@@ -252,39 +252,196 @@ services:
 EOF
 }
 
-# Нода на сервере ноды. Профиль/хост в панели создаёт `fail2detect node add`
-# на сервере панели (он же печатает готовую команду для этого шага).
-#   fail2detect install node [--panel-ip IP] [--secret KEY] [--transport T]
-#        [--port P] [--domain D] [--target host:port] [--node-port 2222]
+# ---------- несколько транспортов на одной ноде ----------
+# Выбор пользователя: T_LIST (транспорты), T_PORTS[транспорт]=порт,
+# T_DOMAIN, T_TARGET (чужой сайт для Reality), T_OBFS (Salamander).
+# Запасные транспорты нужны на случай, если основной глушат (например, UDP
+# для Hysteria 2): клиент переключится на другой хост в подписке.
+NODE_TRANSPORT_SET=(tcp-reality hysteria2 grpc-reality xhttp-reality)
+
+ask_transports() {   # [домен по умолчанию]
+    local i=0 t
+    echo "  Транспорты ноды — можно несколько (запасные, если основной глушат):"
+    for t in "${TRANSPORTS[@]}"; do
+        i=$((i + 1))
+        printf '  %s%d.%s %-14s %s%-26s%s %s\n' "$C_YELLOW" "$i" "$C_RESET" "$t" "$C_GRAY" "$(transport_title "$t")" "$C_RESET" \
+            "$(transport_default_port "$t")/$(transport_l4 "$t")"
+    done
+    printf '  %s%d.%s %sНабор: Reality 443/tcp + Hysteria2 443/udp + gRPC 8443 + XHTTP 4443%s\n' "$C_YELLOW" $((i + 1)) "$C_RESET" "$C_BOLD" "$C_RESET"
+    local preset=$((i + 1)) sel n
+    while true; do
+        ask "Номера через пробел или запятую" "1"
+        T_LIST=()
+        for n in ${REPLY//,/ }; do
+            if [[ "$n" == "$preset" ]]; then T_LIST+=("${NODE_TRANSPORT_SET[@]}")
+            elif [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#TRANSPORTS[@]} )); then T_LIST+=("${TRANSPORTS[n - 1]}")
+            elif transport_valid "$n"; then T_LIST+=("$n")
+            else warn "Нет такого варианта: $n"; T_LIST=(); break; fi
+        done
+        # без повторов, порядок сохраняем
+        local -A seen=(); sel=()
+        for t in "${T_LIST[@]}"; do [[ -n "${seen[$t]:-}" ]] || { sel+=("$t"); seen[$t]=1; }; done
+        T_LIST=("${sel[@]}")
+        ((${#T_LIST[@]})) && break
+    done
+
+    # порты: свой у каждого транспорта, TCP/UDP не пересекаются внутри протокола
+    declare -gA T_PORTS=(); local -A used=()
+    for t in "${T_LIST[@]}"; do
+        local l4; l4=$(transport_l4 "$t")
+        while true; do
+            ask_port "Порт для $(transport_label "$t") ($l4)" "$(transport_default_port "$t")" "$l4"
+            [[ -n "${used[$REPLY/$l4]:-}" ]] && { warn "$REPLY/$l4 уже занят транспортом ${used[$REPLY/$l4]}"; continue; }
+            break
+        done
+        T_PORTS[$t]="$REPLY"; used[$REPLY/$l4]="$t"
+    done
+
+    # домен и сайт для Reality — один на все транспорты
+    T_DOMAIN="${1:-}"; T_TARGET=""; T_OBFS=""
+    local need_domain=no has_reality=no
+    for t in "${T_LIST[@]}"; do
+        transport_tls "$t" && need_domain=yes
+        transport_reality "$t" && has_reality=yes
+    done
+    if [[ "$has_reality" == yes ]]; then
+        echo "  Reality отдаёт сканерам «настоящий» сайт:"
+        echo "   1. свой сайт-заглушка на домене ноды (selfsteal, рекомендуется)"
+        echo "   2. чужой сайт (например www.microsoft.com:443)"
+        ask "Вариант" "1"
+        if [[ "$REPLY" == 2 ]]; then
+            ask "target (хост:порт)" "www.microsoft.com:443"; T_TARGET="$REPLY"
+            [[ "$T_TARGET" == *:* ]] || T_TARGET="$T_TARGET:443"
+        else
+            need_domain=yes
+        fi
+    fi
+    if [[ "$need_domain" == yes ]]; then ask_domain "Домен ноды (A-запись на её IP)" "$T_DOMAIN"; T_DOMAIN="$REPLY"; fi
+    if [[ " ${T_LIST[*]} " == *" hysteria2 "* ]] && confirm "Hysteria 2: включить обфускацию Salamander (клиент тоже должен её поддерживать)?" n; then
+        T_OBFS=$(rand_alnum 20)
+    fi
+    # совместимость со старым кодом: «основной» транспорт
+    T_TRANSPORT="${T_LIST[0]}"; T_PORT="${T_PORTS[$T_TRANSPORT]}"
+    echo
+    for t in "${T_LIST[@]}"; do printf '  %s✔%s %-10s %s/%s\n' "$C_GREEN" "$C_RESET" "$(transport_label "$t")" "${T_PORTS[$t]}" "$(transport_l4 "$t")"; done
+}
+
+# разбор --transports tcp-reality:443,hysteria2:443 (и старых --transport/--port)
+parse_transports_arg() {   # "t:p,t:p"
+    local item t p
+    T_LIST=(); declare -gA T_PORTS=()
+    for item in ${1//,/ }; do
+        t="${item%%:*}"; p="${item#*:}"; [[ "$item" == *:* ]] || p=$(transport_default_port "$t")
+        transport_valid "$t" || die "Неизвестный транспорт: $t"
+        is_port "$p" || die "Неверный порт для $t: $p"
+        T_LIST+=("$t"); T_PORTS[$t]="$p"
+    done
+    ((${#T_LIST[@]})) || die "Не задан ни один транспорт"
+    T_TRANSPORT="${T_LIST[0]}"; T_PORT="${T_PORTS[$T_TRANSPORT]}"
+}
+transports_arg() { local t out=(); for t in "${T_LIST[@]}"; do out+=("$t:${T_PORTS[$t]}"); done; local IFS=,; echo "${out[*]}"; }
+
+# inbound'ы для всех выбранных транспортов; ключи Reality — общие
+build_inbounds() {   # префикс_тега [priv] [sid]
+    local prefix="$1" priv="${2:-}" sid="${3:-}" t arr="[]" inb dom
+    if [[ -z "$priv" ]]; then priv=$(x25519_keys | cut -d' ' -f1); sid=$(rand_hex 8); fi
+    for t in "${T_LIST[@]}"; do
+        dom="$T_DOMAIN"
+        # Reality с чужим сайтом: serverNames — домен этого сайта, а не наш
+        transport_reality "$t" && [[ -n "$T_TARGET" ]] && dom=""
+        inb=$(inbound_build "$t" "${prefix}_$(transport_label "$t" | tr '[:lower:]' '[:upper:]' | tr ' ' '_')" "${T_PORTS[$t]}" "$dom" "$T_TARGET" "" "$priv" "$sid" \
+              "$([[ "$t" == hysteria2 ]] && echo "$T_OBFS")") || return 1
+        arr=$(jq -c --argjson i "$inb" '. + [$i]' <<<"$arr")
+    done
+    echo "$arr"
+}
+
+# подготовить сервер ноды под все выбранные транспорты
+node_prepare_all() {
+    local t dom
+    for t in "${T_LIST[@]}"; do
+        dom="$T_DOMAIN"; transport_reality "$t" && [[ -n "$T_TARGET" ]] && dom=""
+        node_prepare "$t" "${T_PORTS[$t]}" "$dom" "$T_TARGET" || return 1
+    done
+}
+
+tag_prefix() { local n; n=$(tr -cd 'A-Za-z0-9_' <<<"${1// /_}" | tr '[:lower:]' '[:upper:]'); echo "${n:0:16}_$(rand_alnum 3 | tr '[:lower:]' '[:upper:]')"; }
+
+# Нода уже стоит? compose без контейнера — это незавершённая установка,
+# её можно продолжить (раньше после ошибки на сертификате ставить было нельзя).
+node_install_state() {   # -> none | unfinished | installed
+    if ! compose_has_service "$RW_NODE_DIR" remnanode && ! compose_has_service "$RW_PANEL_DIR" remnanode; then echo none; return; fi
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx remnanode; then echo installed; else echo unfinished; fi
+}
+
+# Установка ноды на ЭТОМ сервере.
+#   Автоматически — fail2detect сам создаёт в панели профиль (со всеми
+#     транспортами), ноду, хосты и берёт SECRET_KEY через API.
+#   Вручную — вы создаёте ноду в панели и вставляете SECRET_KEY.
+# Неинтерактивно (команда из `fail2detect node add`):
+#   fail2detect install node --panel-ip IP --secret KEY --transports t:p[,t:p…] [--domain D] [--target host:port]
 install_node() {
     require_root; ensure_deps; ensure_dirs; require_docker; load_config
-    local panel_ip="" secret="" napi=2222
-    T_TRANSPORT=""; T_PORT=""; T_DOMAIN=""; T_TARGET=""
+    local panel_ip="" secret="" napi=2222 targ="" mode=""
+    T_DOMAIN=""; T_TARGET=""; T_OBFS=""; T_LIST=()
+    local one_t="" one_p=""
     while (($#)); do
         case "$1" in
             --panel-ip) panel_ip="$2"; shift;; --secret) secret="$2"; shift;;
-            --transport) T_TRANSPORT="$2"; shift;; --port) T_PORT="$2"; shift;;
+            --transports) targ="$2"; shift;; --transport) one_t="$2"; shift;; --port) one_p="$2"; shift;;
             --domain) T_DOMAIN="$2"; shift;; --target) T_TARGET="$2"; shift;;
-            --node-port) napi="$2"; shift;;
+            --obfs) T_OBFS="$2"; shift;; --node-port) napi="$2"; shift;;
             *) die "Неизвестный параметр: $1";;
         esac; shift
     done
-    { compose_has_service "$RW_NODE_DIR" remnanode || compose_has_service "$RW_PANEL_DIR" remnanode; } \
-        && die "Нода уже установлена. Сменить порт/транспорт: fail2detect node transport"
+    [[ -n "$one_t" ]] && targ="$one_t:${one_p:-$(transport_default_port "$one_t")}"
+
+    case "$(node_install_state)" in
+        installed) die "Нода уже установлена. Сменить транспорт: fail2detect node transport; добавить запасной: fail2detect node add-transport";;
+        unfinished)
+            warn "Найдена незавершённая установка ноды ($RW_NODE_DIR, контейнер не создан)."
+            confirm "Начать установку заново (файлы ноды будут перезаписаны)?" y || return 1;;
+    esac
     title "Установка ноды Remnawave"
-    if [[ -z "$panel_ip" ]] && ! has_panel; then
-        while true; do ask "IP панели"; is_ip "$REPLY" && break; done; panel_ip="$REPLY"
-    fi
-    if [[ -z "$secret" ]]; then
-        info "SECRET_KEY: Панель → Ноды → Добавить ноду → скопировать, или вывод \`fail2detect node add\`"
-        read -r -p "SECRET_KEY: " secret
-    fi
-    [[ -n "$secret" ]] || die "Нужен SECRET_KEY"
-    if [[ -z "$T_TRANSPORT" ]]; then
-        ask_transport_params
+
+    if [[ -n "$secret" ]]; then
+        mode=manual
+        [[ -n "$targ" ]] || die "Нужен --transports (например tcp-reality:443,hysteria2:443)"
+        parse_transports_arg "$targ"
     else
-        transport_valid "$T_TRANSPORT" || die "Неизвестный транспорт: $T_TRANSPORT"
-        is_port "${T_PORT:-}" || die "Нужен --port"
+        echo "  1. Автоматически — fail2detect сам создаст в панели профиль, ноду и хосты"
+        echo "     и возьмёт SECRET_KEY (нужны адрес панели и API-токен)"
+        echo "  2. Вручную — вы создаёте ноду в панели и вставляете SECRET_KEY"
+        ask "Способ" "1"; [[ "$REPLY" == 2 ]] && mode=manual || mode=auto
+    fi
+
+    if [[ "$mode" == auto ]]; then
+        rw_need_api || { warn "Без доступа к панели — переходим к ручной установке"; mode=manual; }
+    fi
+
+    if [[ "$mode" == auto ]]; then
+        local me name cc ph
+        me=$(public_ip)
+        ask "Имя ноды в панели" "$(hostname -s)"; name="$REPLY"
+        cc=$(curl -sS --max-time 6 "https://ipinfo.io/widget/demo/$me" 2>/dev/null | jq -r '.data.country // empty' 2>/dev/null)
+        ask "Код страны (2 буквы)" "${cc:-XX}"; cc="${REPLY^^}"
+        ask "Адрес ноды для панели (IP или домен)" "$me"; local addr="$REPLY"
+        ask_transports
+        ph=$(sed -E 's#^https?://([^/:]+).*#\1#' <<<"$RW_API_URL")
+        panel_ip=$(getent ahostsv4 "$ph" 2>/dev/null | awk 'NR==1{print $1}')
+        [[ "$ph" == 127.0.0.1 ]] && panel_ip=127.0.0.1
+        info "С какого IP панель подключается к ноде? (домен за Cloudflare даст не тот адрес)"
+        while true; do ask "IP сервера панели" "$panel_ip"; is_ip "$REPLY" && break; done; panel_ip="$REPLY"
+        node_add_api "$name" "$addr" "$cc" "${T_DOMAIN:-$addr}" || return 1
+        secret="$NODE_SECRET"
+    elif [[ -z "$secret" ]]; then
+        if [[ -z "$panel_ip" ]] && ! has_panel; then
+            while true; do ask "IP сервера панели"; is_ip "$REPLY" && break; done; panel_ip="$REPLY"
+        fi
+        info "SECRET_KEY: Панель → Ноды → Создать ноду → скопировать SECRET_KEY"
+        read_secret "SECRET_KEY ноды (вставьте)"; secret="$REPLY"
+        [[ -n "$secret" ]] || die "Нужен SECRET_KEY"
+        ask_transports
     fi
 
     write_node_compose "$RW_NODE_DIR" "$napi" "$secret"
@@ -292,89 +449,115 @@ install_node() {
     config_set NODE_API_PORT "$napi"
     [[ -n "$panel_ip" ]] && ufw_allow "$napi" tcp "$panel_ip" "Remnawave panel"
 
-    node_prepare "$T_TRANSPORT" "$T_PORT" "$T_DOMAIN" "$T_TARGET" || return 1
-    (cd "$RW_NODE_DIR" && docker compose up -d >/dev/null 2>&1) || die "Нода не запустилась"
-    ok "Нода запущена (API на $napi только для ${panel_ip:-панели})"
-    audit_write INSTALL - - - "нода $T_TRANSPORT $T_PORT ${T_DOMAIN:-$T_TARGET}"
-    if [[ -n "$panel_ip" ]] && ! ss -H -tln "( sport = :$T_PORT )" | grep -q . && [[ "$(transport_l4 "$T_TRANSPORT")" == tcp ]]; then
-        info "Xray поднимется, когда панель пришлёт конфиг (нода → «Подключена» в панели)."
+    node_prepare_all || return 1
+    (cd "$RW_NODE_DIR" && docker compose up -d >/dev/null 2>&1) || die "Нода не запустилась: cd $RW_NODE_DIR && docker compose logs"
+    ok "Контейнер ноды запущен (API ноды $napi — только для ${panel_ip:-панели})"
+    audit_write INSTALL - - - "нода ($mode) $(transports_arg) ${T_DOMAIN:-$T_TARGET}"
+
+    if [[ "$mode" == auto && -n "${NODE_UUID:-}" ]]; then
+        info "Жду, пока панель подключится к ноде и пришлёт конфиг…"
+        local i st=""
+        for i in $(seq 1 30); do
+            st=$(rw_api GET "/api/nodes/$NODE_UUID" | jq -r '.response.isConnected // empty' 2>/dev/null)
+            [[ "$st" == true ]] && break; sleep 3
+        done
+        [[ "$st" == true ]] && ok "Панель видит ноду: подключена" || warn "Панель пока не подключилась к ноде — проверьте IP панели ($panel_ip) и фаервол"
     fi
-    echo
-    info "Если ноду в панели вы создавали вручную, вставьте в её профиль inbound:"
-    echo "    fail2detect node inbound-json $T_TRANSPORT $T_PORT ${T_DOMAIN:-\"\"} ${T_TARGET}"
+    local t
+    for t in "${T_LIST[@]}"; do
+        if node_wait_port "${T_PORTS[$t]}" "$(transport_l4 "$t")"; then ok "$(transport_label "$t"): слушает ${T_PORTS[$t]}/$(transport_l4 "$t")"
+        else warn "$(transport_label "$t"): ${T_PORTS[$t]}/$(transport_l4 "$t") пока не слушается (Xray поднимется, когда панель пришлёт конфиг)"; fi
+    done
+    if [[ "$mode" == manual ]]; then
+        echo
+        info "Создайте в панели профиль с этими inbound'ами (или используйте автоматический режим):"
+        for t in "${T_LIST[@]}"; do echo "    fail2detect node inbound-json $t ${T_PORTS[$t]} ${T_DOMAIN:-\"\"} ${T_TARGET}"; done
+    fi
     echo
     confirm "Настроить защиту fail2detect сейчас?" y && setup_wizard
 }
 
 # ---------- добавление ноды в панель (на сервере панели) ----------
-# Профиль конфигурации + нода + хост + inbound в squad. Печатает команду для ноды.
+# Профиль со всеми транспортами + нода + хосты + squad. Печатает команду для ноды.
 node_add() {   # [address]
     require_root; load_config; rw_need_api || return 1
     title "Новая нода в панели"
     ask "Имя ноды" "node-$(rand_alnum 4 | tr '[:upper:]' '[:lower:]')"; local name="$REPLY"
     ask "Адрес ноды (IP или домен, к нему подключается панель)" "${1:-}"; local addr="$REPLY"
     ask "Код страны (2 буквы)" "XX"; local cc="${REPLY^^}"
-    ASK_PORT_NOCHECK=1 ask_transport_params
+    ASK_PORT_NOCHECK=1 ask_transports
     node_add_api "$name" "$addr" "$cc" "${T_DOMAIN:-$addr}" || return 1
     title "Дальше — на сервере ноды"
     echo "  bash <(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)"
-    printf '  fail2detect install node --panel-ip %s --secret %q --transport %s --port %s' \
-        "$(public_ip)" "$NODE_SECRET" "$T_TRANSPORT" "$T_PORT"
+    printf '  fail2detect install node --panel-ip %s --secret %q --transports %s' "$(public_ip)" "$NODE_SECRET" "$(transports_arg)"
     [[ -n "$T_DOMAIN" ]] && printf ' --domain %s' "$T_DOMAIN"
     [[ -n "$T_TARGET" ]] && printf ' --target %s' "$T_TARGET"
+    [[ -n "$T_OBFS" ]] && printf ' --obfs %s' "$T_OBFS"
     echo
 }
 
 # нода на сервере панели (вызывается из install_panel)
 node_add_local() {
     info "Нода на этом же сервере"
-    ask_transport_params
+    ask_transports
     local gw; gw=$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
     [[ -n "$gw" ]] || gw="172.17.0.1"
     node_add_api "local" "$gw" "XX" "${T_DOMAIN:-$(public_ip)}" || return 1
-    # если Xray занял 443/tcp, nginx уходит только на unix-сокет (панель — через Reality)
-    if [[ "$(transport_l4 "$T_TRANSPORT")" == tcp && "$T_PORT" == "$WEB_PORT" ]]; then
-        if transport_reality "$T_TRANSPORT" && [[ -z "$T_TARGET" ]]; then
-            web_set WEB_PORT ""; info "Панель будет доступна через Reality-порт $T_PORT (selfsteal)"
+    # если Xray занял порт nginx (443/tcp), nginx уходит на unix-сокет (панель — через Reality)
+    local t
+    for t in "${T_LIST[@]}"; do
+        [[ "$(transport_l4 "$t")" == tcp && "${T_PORTS[$t]}" == "$WEB_PORT" ]] || continue
+        if [[ "$t" == tcp-reality && -z "$T_TARGET" ]]; then
+            web_set WEB_PORT ""; info "Панель будет доступна через Reality-порт ${T_PORTS[$t]} (selfsteal)"
         else
-            web_set WEB_PORT 8443; warn "443 занят Xray — панель переезжает на 8443"
+            web_set WEB_PORT 8443; warn "${T_PORTS[$t]} занят Xray — панель переезжает на 8443"
         fi
-    fi
+    done
     write_node_compose "$RW_NODE_DIR" 2222 "$NODE_SECRET"
     config_set NODE_API_PORT 2222
     [[ -n "$T_DOMAIN" ]] && { cert_ensure "$T_DOMAIN" || return 1; }
-    if transport_reality "$T_TRANSPORT" && [[ -z "$T_TARGET" ]]; then web_set SELFSTEAL_DOMAIN "$T_DOMAIN"; fi
+    [[ " ${T_LIST[*]} " == *-reality* && -z "$T_TARGET" ]] && web_set SELFSTEAL_DOMAIN "$T_DOMAIN"
     web_load; web_apply || return 1
-    node_prepare "$T_TRANSPORT" "$T_PORT" "$T_DOMAIN" "$T_TARGET" || return 1
+    node_prepare_all || return 1
     (cd "$RW_NODE_DIR" && docker compose up -d >/dev/null 2>&1) && ok "Нода запущена"
 }
 
-# общая часть: профиль, нода, хост, squad. Выставляет NODE_SECRET.
+# общая часть: профиль (все транспорты), нода, хосты, squad. Выставляет NODE_SECRET, NODE_UUID.
 node_add_api() {   # name address country host_address
-    local name="$1" addr="$2" cc="$3" haddr="$4" tag inb cfg r puuid iuuid nuuid
-    tag="$(echo "${T_TRANSPORT}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')_$(rand_alnum 4 | tr '[:lower:]' '[:upper:]')"
-    inb=$(inbound_build "$T_TRANSPORT" "$tag" "$T_PORT" "$T_DOMAIN" "$T_TARGET" "" "" "" "$T_OBFS") || return 1
-    cfg=$(profile_config "$inb")
+    local name="$1" addr="$2" cc="$3" haddr="$4" inbs cfg r puuid nuuid prefix
+    prefix=$(tag_prefix "$name")
+    inbs=$(build_inbounds "$prefix") || return 1
+    cfg=$(profile_config "$inbs")
     r=$(rw_api POST /api/config-profiles "$(jq -n --arg n "f2d-${name:0:20}" --argjson c "$cfg" '{name:$n, config:$c}')")
-    puuid=$(jq -r '.response.uuid // empty' <<<"$r"); iuuid=$(jq -r '.response.inbounds[0].uuid // empty' <<<"$r")
-    [[ -n "$puuid" && -n "$iuuid" ]] || { err "Профиль не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
-    ok "Профиль f2d-$name ($(transport_title "$T_TRANSPORT"), порт $T_PORT)"
+    puuid=$(jq -r '.response.uuid // empty' <<<"$r")
+    [[ -n "$puuid" ]] || { err "Профиль не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
+    local -A uuid_of=(); local tag u
+    while IFS=$'\t' read -r tag u; do uuid_of[$tag]="$u"; done < <(jq -r '.response.inbounds[] | [.tag, .uuid] | @tsv' <<<"$r")
+    local all; all=$(jq -c '[.response.inbounds[].uuid]' <<<"$r")
+    ok "Профиль f2d-$name: $(for t in "${T_LIST[@]}"; do printf '%s %s/%s  ' "$(transport_label "$t")" "${T_PORTS[$t]}" "$(transport_l4 "$t")"; done)"
 
-    r=$(rw_api POST /api/nodes "$(jq -n --arg n "$name" --arg a "$addr" --arg cc "$cc" --arg p "$puuid" --arg i "$iuuid" \
-        '{name:$n, address:$a, port:2222, countryCode:$cc, isTrafficTrackingActive:false, configProfile:{activeConfigProfileUuid:$p, activeInbounds:[$i]}}')")
-    nuuid=$(jq -r '.response.uuid // empty' <<<"$r")
-    [[ -n "$nuuid" ]] || { err "Нода не создана: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
+    r=$(rw_api POST /api/nodes "$(jq -n --arg n "$name" --arg a "$addr" --arg cc "$cc" --arg p "$puuid" --argjson i "$all" \
+        '{name:$n, address:$a, port:2222, countryCode:$cc, isTrafficTrackingActive:false, configProfile:{activeConfigProfileUuid:$p, activeInbounds:$i}}')")
+    NODE_UUID=$(jq -r '.response.uuid // empty' <<<"$r")
+    [[ -n "$NODE_UUID" ]] || { err "Нода не создана: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
     ok "Нода $name ($addr)"
 
-    local hf; hf=$(host_fields "$inb" "$haddr")
-    r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$iuuid" --arg rem "$name" \
-        '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
-    jq -e '.response.uuid' >/dev/null <<<"$r" && ok "Хост для подписки" || warn "Хост не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
-
-    squad_add_inbound "$iuuid"
+    # хост на каждый транспорт: «Имя · Reality», «Имя · Hysteria2», …
+    local inb hf label
+    while read -r inb; do
+        tag=$(jq -r .tag <<<"$inb"); u="${uuid_of[$tag]:-}"
+        [[ -n "$u" ]] || continue
+        label=$(transport_label "$(transport_of_inbound <<<"$inb")")
+        hf=$(host_fields "$inb" "$haddr")
+        r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$u" --arg rem "$name · $label" \
+            '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
+        if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$name · $label»"; else warn "Хост «$name · $label» не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+        squad_add_inbound "$u" >/dev/null
+    done < <(jq -c '.[]' <<<"$inbs")
+    ok "Inbound'ы добавлены в squad (пользователи их получат)"
     NODE_SECRET=$(rw_api GET /api/keygen | jq -r '.response.secretKey // .response.pubKey // empty')
     [[ -n "$NODE_SECRET" ]] || { err "Не удалось получить SECRET_KEY ноды"; return 1; }
-    audit_write NODE_ADD - "$tag" - "$name $addr $T_TRANSPORT:$T_PORT"
+    audit_write NODE_ADD - "$prefix" - "$name $addr $(transports_arg)"
 }
 
 squad_add_inbound() {   # inbound_uuid [old_uuid]

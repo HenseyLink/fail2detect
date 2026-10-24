@@ -77,6 +77,31 @@ inb=$(inbound_build xhttp-reality T 443 d.example.com "" "/keep" "PRIV" "SID")
 [[ "$(jq -r '.streamSettings | .xhttpSettings.path + " " + .realitySettings.privateKey + " " + .realitySettings.shortIds[0]' <<<"$inb")" == "/keep PRIV SID" ]] \
     && pass "смена транспорта сохраняет ключи и path" || fail "сохранение ключей и path"
 
+section "Несколько транспортов на одной ноде"
+parse_transports_arg "tcp-reality:443,hysteria2:443,grpc-reality:8443,xhttp-reality:4443"
+[[ "${#T_LIST[@]}" == 4 && "${T_PORTS[hysteria2]}" == 443 && "$(transports_arg)" == "tcp-reality:443,hysteria2:443,grpc-reality:8443,xhttp-reality:4443" ]] \
+    && pass "--transports разбирается и собирается обратно" || fail "--transports" "$(transports_arg)"
+T_DOMAIN=node.example.com; T_TARGET=""; T_OBFS=obfs123
+inbs=$(build_inbounds NODE_ABC)
+[[ "$(jq length <<<"$inbs")" == 4 ]] && pass "набор: 4 inbound'а" || fail "набор" "$(jq length <<<"$inbs")"
+[[ "$(jq -r '[.[].tag] | unique | length' <<<"$inbs")" == 4 ]] && pass "теги уникальны: $(jq -r '[.[].tag] | join(" ")' <<<"$inbs")" || fail "теги"
+[[ "$(jq -r '[.[] | .streamSettings.realitySettings.privateKey // empty] | unique | length' <<<"$inbs")" == 1 ]] && pass "ключ Reality общий для всех Reality-транспортов" || fail "общий ключ Reality"
+[[ "$(jq -r '.[] | select(.protocol=="hysteria") | .streamSettings.finalmask.udp[0].settings.password' <<<"$inbs")" == obfs123 ]] && pass "Salamander только у Hysteria2" || fail "Salamander"
+T_TARGET="www.microsoft.com:443"; parse_transports_arg "tcp-reality:443,xhttp-tls:2083"
+inbs=$(build_inbounds N2)
+[[ "$(jq -r '.[0].streamSettings.realitySettings.serverNames[0] + " " + .[1].streamSettings.tlsSettings.serverName' <<<"$inbs")" == "www.microsoft.com node.example.com" ]] \
+    && pass "чужой сайт для Reality + свой домен для TLS" || fail "SNI Reality/TLS" "$(jq -c '[.[0].streamSettings.realitySettings.serverNames, .[1].streamSettings.tlsSettings.serverName]' <<<"$inbs")"
+# интерактивный выбор: «набор» (7), порты по умолчанию, свой сайт, без Salamander
+ask_domain() { REPLY=node.example.com; }
+ASK_PORT_NOCHECK=1 ask_transports < <(printf '7\n\n\n\n\n1\nn\n') >/dev/null 2>&1
+[[ "${T_LIST[*]}" == "tcp-reality hysteria2 grpc-reality xhttp-reality" && "${T_PORTS[grpc-reality]}" == 8443 && "$T_DOMAIN" == node.example.com && -z "$T_OBFS" ]] \
+    && pass "выбор «набор»: 4 транспорта, порты по умолчанию" || fail "выбор набора" "${T_LIST[*]} | ${T_PORTS[grpc-reality]:-} | $T_DOMAIN"
+ASK_PORT_NOCHECK=1 ask_transports < <(printf '1 6 1\n\n\n1\nn\n') >/dev/null 2>&1
+[[ "${T_LIST[*]}" == "tcp-reality hysteria2" ]] && pass "выбор «1 6 1»: без повторов" || fail "выбор 1 6 1" "${T_LIST[*]}"
+ASK_PORT_NOCHECK=1 ask_transports < <(printf '1 3\n443\n443\n2083\n1\n') >/dev/null 2>&1
+[[ "${T_PORTS[xhttp-tls]}" == 2083 ]] && pass "один TCP-порт двум транспортам не отдаётся" || fail "конфликт портов" "${T_PORTS[xhttp-tls]:-}"
+unset -f ask_domain; T_TARGET=""; T_OBFS=""
+
 section "docker-compose ноды (разные установщики и отступы)"
 node_dir() { echo "$WORK/node"; }
 for fx in compose-nginx compose-caddy; do

@@ -98,8 +98,21 @@ cert_ask_method() {   # [--again] — спросить, даже если спо
     else
         config_set CERT_METHOD http
     fi
-    ask "E-mail для Let's Encrypt (пусто — без e-mail)" "${CERT_EMAIL:-}"
-    config_set CERT_EMAIL "$REPLY"
+    cert_ask_email
+}
+
+# e-mail для Let's Encrypt: формат проверяем, ошибку можно исправить
+cert_ask_email() {
+    while true; do
+        ask "E-mail для Let's Encrypt (пусто — без e-mail)" "${CERT_EMAIL:-}"
+        if [[ -z "$REPLY" || "$REPLY" == "-" ]]; then config_set CERT_EMAIL ""; return 0; fi
+        if [[ ! "$REPLY" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            warn "«$REPLY» не похож на e-mail. Введите заново (или «-» — без e-mail)."
+            continue
+        fi
+        confirm "E-mail $REPLY — верно?" y || continue
+        config_set CERT_EMAIL "$REPLY"; return 0
+    done
 }
 
 # получить сертификат, если готового нет
