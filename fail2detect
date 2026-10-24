@@ -21,7 +21,8 @@ usage() {
     cat <<EOF
 ${C_BOLD}fail2detect $F2D_VERSION${C_RESET} — защита нод и панели Remnawave
 
-${C_BOLD}Использование:${C_RESET} fail2detect [команда]   (без команды — интерактивное меню)
+${C_BOLD}Использование:${C_RESET} fail2detect [команда]   или коротко: f2d [команда]
+               (без команды — интерактивное меню)
 
 ${C_BOLD}Настройка${C_RESET}
   setup                     мастер настройки защиты
@@ -127,6 +128,7 @@ cmd_uninstall() {
     systemctl daemon-reload
     fw_disable
     rm -f /usr/local/bin/fail2detect
+    [[ "$(readlink -f /usr/local/bin/f2d 2>/dev/null)" == "$F2D_BIN" ]] && rm -f /usr/local/bin/f2d
     confirm "Удалить конфиги и журнал аудита ($F2D_CONF_DIR, $F2D_LOG_DIR)?" n && rm -rf "$F2D_CONF_DIR" "$F2D_LOG_DIR" "$F2D_STATE_DIR"
     rm -rf "$F2D_SHARE"
     ok "fail2detect удалён"

@@ -38,6 +38,13 @@ rm -rf "$DEST.old"; [[ -d "$DEST" ]] && mv "$DEST" "$DEST.old"
 mv "$DEST.new" "$DEST"
 chmod 755 "$DEST/fail2detect"
 ln -sf "$DEST/fail2detect" /usr/local/bin/fail2detect
+# короткая команда f2d — только если это имя свободно или уже наше
+SHORT=/usr/local/bin/f2d
+if [[ ! -e "$SHORT" && ! -L "$SHORT" ]] || [[ "$(readlink -f "$SHORT" 2>/dev/null)" == "$DEST/fail2detect" ]]; then
+    ln -sf "$DEST/fail2detect" "$SHORT"
+else
+    red "$SHORT уже занят другой программой — короткое имя f2d не создано, используйте fail2detect"
+fi
 
 mkdir -p /etc/fail2detect/jail.d /var/lib/fail2detect /var/log/fail2detect
 chmod 700 /etc/fail2detect /var/lib/fail2detect
@@ -68,7 +75,7 @@ if [[ "$MODE" == --update ]]; then
     exit 0
 fi
 
-green "fail2detect установлен: /usr/local/bin/fail2detect"
+green "fail2detect установлен: /usr/local/bin/fail2detect (коротко: f2d)"
 echo
 if [[ -t 0 ]] || [[ -e /dev/tty ]]; then
     read -r -p "Запустить мастер настройки сейчас? [Y/n]: " a </dev/tty || a=y
