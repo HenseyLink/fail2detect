@@ -170,6 +170,9 @@ jail_loop portscan < <(
 [[ " ${bans[*]:-} " != *" 95.24.1.1 "* ]] && pass "10 стуков в ОДИН порт (шум за CGNAT) — без бана" || fail "бан за стуки в один порт"
 [[ " ${bans[*]:-} " == *" 95.24.2.2 "* ]] && pass "6 РАЗНЫХ закрытых портов (сканер) — бан" || fail "сканер не забанен" "${bans[*]:-}"
 [[ " ${bans[*]:-} " != *" 95.24.3.3 "* ]] && pass "5 разных портов — ещё без бана" || fail "бан раньше порога"
+# jail без DISTINCT (sshd) по-прежнему банит по числу совпадений
+jail_loop sshd < <(for i in 1 2 3 4 5; do echo "Failed password for root from 45.8.8.8 port 1 ssh2"; done)
+[[ " ${bans[*]:-} " == *" 45.8.8.8 "* ]] && pass "sshd: 5 неудач — бан (счётчик без DISTINCT)" || fail "sshd не банит" "${bans[*]:-}"
 unset -f ban_add; source "$ROOT/lib/jail.sh"
 # правила: забаненным открыты порты Xray (except-xray), при all — нет
 NODE_XRAY_PORTS="443/tcp 443/udp"; BAN_SCOPE=except-xray
@@ -310,7 +313,9 @@ else
     fw_apply >/dev/null
     nft list set inet fail2detect banned4 | grep -q '45.9.9.9' && pass "бан восстановлен после fw_apply" || fail "бан восстановлен после fw_apply"
 
-    ban_add 45.9.9.9 300 test "повтор" >/dev/null
+    # повторный бан — когда IP попался снова ПОСЛЕ снятия бана (пока бан действует,
+    # новые строки лога ничего не меняют — так не было эскалации 1→2→4 за секунду)
+    ban_remove 45.9.9.9 quiet; ban_add 45.9.9.9 300 test "повтор" >/dev/null
     t=$(nft -j list set inet fail2detect banned4 | jq -r '.nftables[].set.elem // empty | .[] | select(.elem.val=="45.9.9.9") | .elem.timeout')
     [[ "$t" == 600 ]] && pass "повторный бан вдвое дольше (600 с)" || fail "повторный бан вдвое дольше" "timeout=$t"
 

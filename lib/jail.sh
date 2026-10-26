@@ -286,8 +286,9 @@ jail_loop() {
         printf -v t '%(%s)T' -1
         # DISTINCT: считать не совпадения, а разные значения (например, разные
         # порты: сканер перебирает порты, «шум» за CGNAT бьёт в одни и те же)
-        local key=""
+        local key="-"   # без DISTINCT — заглушка: пустой ключ bash в ассоц. массив не пускает
         if [[ -n "$J_DISTINCT" ]]; then
+            key=""
             [[ "$line" =~ $J_DISTINCT ]] && key="${BASH_REMATCH[1]:-}"
             [[ -n "$key" ]] || continue
         fi
@@ -296,7 +297,7 @@ jail_loop() {
         local -A uniq=()
         for ts in ${hits[$ip]:-}; do
             (( ${ts%%:*} > t - J_FINDTIME )) || continue
-            kept+="$ts "; uniq[${ts#*:}]=1
+            kept+="$ts "; [[ -n "${ts#*:}" ]] && uniq[${ts#*:}]=1
         done
         kept+="$t:$key"; uniq[$key]=1
         if [[ -n "$J_DISTINCT" ]]; then cnt=${#uniq[@]}; else cnt=$(wc -w <<<"$kept"); fi
