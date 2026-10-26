@@ -50,6 +50,8 @@ fw_public_tcp() {
     local p=() x
     for x in $(detect_ssh_ports); do p+=("$x"); done
     has_node && for x in $(detect_xray_ports); do p+=("$x"); done
+    # известные порты Xray не выпадают, даже если Xray сейчас перезапускается
+    for x in $NODE_XRAY_PORTS; do [[ "${x#*/}" == tcp ]] && p+=("${x%/*}"); done
     for x in $PUBLIC_TCP; do p+=("$x"); done
     if [[ "$(fw_mode)" == ufw ]]; then
         while read -r proto x; do [[ "$proto" == tcp ]] && p+=("$x"); done < <(ufw_open_ports)
@@ -65,6 +67,7 @@ fw_public_udp() {
     local p=() x
     for x in $PUBLIC_UDP; do p+=("$x"); done
     has_node && for x in $(detect_xray_udp_ports); do p+=("$x"); done
+    for x in $NODE_XRAY_PORTS; do [[ "${x#*/}" == udp ]] && p+=("${x%/*}"); done
     if [[ "$(fw_mode)" == ufw ]]; then
         while read -r proto x; do [[ "$proto" == udp ]] && p+=("$x"); done < <(ufw_open_ports)
     fi
@@ -83,9 +86,21 @@ _ips() {   # family list...
 _elements() { [[ -n "$1" ]] && printf ' elements = { %s };' "$1"; }
 
 # ---------- генерация правил ----------
+# порты Xray этой ноды — баны их не закрывают (см. BAN_SCOPE)
+fw_xray_ports() {   # tcp|udp -> "443,8443"
+    local l4="$1" out=() p x
+    for x in $NODE_XRAY_PORTS; do [[ "${x#*/}" == "$l4" ]] && out+=("${x%/*}"); done
+    if has_node; then
+        if [[ "$l4" == tcp ]]; then for p in $(detect_xray_ports); do out+=("$p"); done
+        else for p in $(detect_xray_udp_ports); do out+=("$p"); done; fi
+    fi
+    ((${#out[@]})) && printf '%s\n' "${out[@]}" | sort -un | paste -sd, -
+}
+
 fw_render() {
-    local mode tcp udp api wan trusted4 trusted6 panel4 panel6
+    local mode tcp udp api wan trusted4 trusted6 panel4 panel6 xtcp xudp
     mode=$(fw_mode)
+    xtcp=$(fw_xray_ports tcp); xudp=$(fw_xray_ports udp)
     tcp=$(fw_public_tcp | tr ' ' ',')
     udp=$(fw_public_udp | tr ' ' ',')
     api=""; has_node && api=$(detect_node_api_port)
@@ -119,6 +134,8 @@ table inet $F2D_NFT_TABLE {
     set pub_tcp  { type inet_service; flags interval;$(_elements "$tcp") }
     set pub_udp  { type inet_service; flags interval;$(_elements "$udp") }
     set node_api { type inet_service;$(_elements "$api") }
+    set xray_tcp { type inet_service; flags interval;$(_elements "$xtcp") }
+    set xray_udp { type inet_service; flags interval;$(_elements "$xudp") }
     set flood4   { type ipv4_addr; flags dynamic, timeout; timeout 1m; }
     set flood6   { type ipv6_addr; flags dynamic, timeout; timeout 1m; }
 
@@ -127,10 +144,21 @@ table inet $F2D_NFT_TABLE {
         iif "lo" accept
         ip  saddr @trusted4 accept
         ip6 saddr @trusted6 accept
-        ip  saddr @banned4 drop
-        ip6 saddr @banned6 drop
+        # известные сканеры (блок-листы) — закрыто всё
         ip  saddr @block4 drop
         ip6 saddr @block6 drop
+$( if [[ "${BAN_SCOPE:-except-xray}" != all ]]; then cat <<'RULES'
+        # Бан jail'ов не трогает порты Xray: за одним IP мобильного оператора
+        # (CGNAT) сидят тысячи абонентов, и бан «шумного» соседа отрезал бы
+        # VPN всем. Забаненный по-прежнему не видит SSH, API ноды и прочее.
+        ip  saddr @banned4 tcp dport @xray_tcp accept
+        ip  saddr @banned4 udp dport @xray_udp accept
+        ip6 saddr @banned6 tcp dport @xray_tcp accept
+        ip6 saddr @banned6 udp dport @xray_udp accept
+RULES
+fi )
+        ip  saddr @banned4 drop
+        ip6 saddr @banned6 drop
         ct state established,related accept
         ct state invalid drop
 
@@ -318,6 +346,30 @@ fw_status() {
     printf '  %-26s %s\n' "Анти-флуд:" "$FLOOD_GUARD$( [[ $FLOOD_GUARD == yes ]] && echo " ($FLOOD_RATE)")"
 }
 
+# Панель может прислать ноде новый inbound в любой момент (другой порт,
+# Hysteria на UDP). Раньше список портов снимался только при применении
+# правил: новый порт оставался закрытым, клиентов дропало, а portscan их
+# банил. Демон вызывает это каждые 30 с и сразу открывает новые порты Xray.
+xray_ports_sync() {
+    has_node || return 0
+    local p l4 added=()
+    while read -r l4 p; do
+        [[ -n "$p" ]] || continue
+        [[ " $NODE_XRAY_PORTS " == *" $p/$l4 "* ]] && continue
+        [[ "$p" == "$(detect_node_api_port 2>/dev/null)" ]] && continue
+        list_add NODE_XRAY_PORTS "$p/$l4"
+        nft add element inet "$F2D_NFT_TABLE" "pub_$l4" "{ $p }" 2>/dev/null
+        nft add element inet "$F2D_NFT_TABLE" "xray_$l4" "{ $p }" 2>/dev/null
+        ufw_allow "$p" "$l4" "" "Xray (auto)"
+        added+=("$p/$l4")
+    done < <(for p in $(detect_xray_ports); do echo "tcp $p"; done; for p in $(detect_xray_udp_ports); do echo "udp $p"; done)
+    if ((${#added[@]})); then
+        audit_write PORT_OPEN - xray - "Xray начал слушать: ${added[*]} — открыто автоматически"
+        info "Открыты новые порты Xray: ${added[*]}"
+    fi
+    return 0
+}
+
 # ---------- порты ----------
 fw_port_open() {   # port [proto]
     local port="$1" proto="${2:-tcp}"
@@ -356,6 +408,14 @@ blocklist_update() {
     local name url tmp4 tmp6 total=0
     tmp4=$(mktemp); tmp6=$(mktemp)
     for name in $BLOCKLISTS; do
+        # «government» содержит не только сети госорганов, но и мобильные пулы
+        # (USI_GPRS_USERS, UTEL_GPRS_NET, части T2/Мегафона) и CDN — с ним
+        # абоненты мобильных операторов не могут подключиться к ноде
+        if [[ "$name" == government && "${BLOCKLIST_GOVERNMENT_FORCE:-no}" != yes ]]; then
+            warn "Блок-лист government пропущен: в нём пулы мобильных абонентов (GPRS-сети Ростелекома, T2, Мегафона) — клиенты с мобильного интернета теряли доступ."
+            warn "Уберите его: fail2detect config BLOCKLISTS \"antiscanner skipa\" (принудительно: BLOCKLIST_GOVERNMENT_FORCE=yes)"
+            continue
+        fi
         url="BLOCKLIST_URL_${name}"; url="${!url:-}"
         [[ -n "$url" ]] || { warn "Блок-лист $name: нет URL (BLOCKLIST_URL_$name)"; continue; }
         local raw; raw=$(curl -fsSL --max-time 30 "$url" 2>/dev/null) || { warn "Блок-лист $name: не скачался"; continue; }
@@ -368,8 +428,17 @@ blocklist_update() {
     done
     # никогда не блокируем себя, доверенных и панель
     local keep=" $TRUSTED_IPS $(detect_panel_ips) "
-    sort -u "$tmp4" | while read -r c; do is_ipv4 "$c" && [[ "$keep" != *" ${c%/32} "* ]] && echo "$c"; done > "$F2D_STATE_DIR/blocklist4.txt"
-    sort -u "$tmp6" > "$F2D_STATE_DIR/blocklist6.txt"
+    # и не берём слишком крупные сети (шире /16 для IPv4, /32 для IPv6):
+    # одна ошибочная строка списка не должна отрезать целый регион
+    local wide=0
+    sort -u "$tmp4" | while read -r c; do
+        is_ipv4 "$c" || continue
+        [[ "$c" == */* ]] && (( ${c#*/} < 16 )) && continue
+        [[ "$keep" != *" ${c%/32} "* ]] && echo "$c"
+    done > "$F2D_STATE_DIR/blocklist4.txt"
+    sort -u "$tmp6" | while read -r c; do [[ "$c" == */* ]] && (( ${c#*/} < 32 )) && continue; echo "$c"; done > "$F2D_STATE_DIR/blocklist6.txt"
+    wide=$(( $(sort -u "$tmp4" "$tmp6" | wc -l) - $(cat "$F2D_STATE_DIR"/blocklist{4,6}.txt | wc -l) ))
+    (( wide > 0 )) && info "Отброшено $wide записей (слишком крупные сети, свои/доверенные адреса)"
     rm -f "$tmp4" "$tmp6"
     audit_write BLOCKLIST - - - "обновлено: $total сетей ($BLOCKLISTS)"
     nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1 && fw_apply >/dev/null && ok "Блок-листы загружены в фаервол"

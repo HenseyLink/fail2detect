@@ -81,8 +81,10 @@ setup_wizard() {
     if confirm "Подключить блок-листы сканеров РКН/«Скипа» (antiscanner, skipa)?" y; then
         config_set BLOCKLISTS "antiscanner skipa"
     else config_set BLOCKLISTS ""; fi
-    if confirm "Также блокировать государственные сети РФ (~12 тыс. подсетей)?" n; then
-        list_add BLOCKLISTS government
+    # список «government» больше не предлагаем: в нём пулы мобильных абонентов
+    if [[ " $BLOCKLISTS " == *" government "* ]]; then
+        warn "Подключён блок-лист government — в нём пулы мобильных абонентов (клиенты с мобильного интернета не подключаются)."
+        confirm "Отключить его (рекомендуется)?" y && list_del BLOCKLISTS government
     fi
     if confirm "Не отвечать на ping (скрыть сервер от массовых сканеров)?" y; then
         config_set STEALTH_ICMP yes
@@ -129,6 +131,16 @@ doctor() {
     fi
     [[ -s "$F2D_STATE_DIR/blocklist4.txt" ]] && _chk ok "Блок-листы сканеров: $(wc -l < "$F2D_STATE_DIR/blocklist4.txt") сетей" || _chk warn "Блок-листы сканеров не загружены" "fail2detect blocklist update"
     [[ "$STEALTH_ICMP" == yes ]] && _chk ok "Сервер не отвечает на ping" || _chk warn "Сервер отвечает на ping"
+    if [[ " $BLOCKLISTS " == *" government "* ]]; then
+        _chk bad "Подключён блок-лист government — в нём пулы мобильных абонентов" "клиенты с мобильного интернета не подключаются: fail2detect config BLOCKLISTS \"antiscanner skipa\""
+    fi
+    if has_node; then
+        if [[ "${BAN_SCOPE:-except-xray}" == all ]]; then
+            _chk warn "Бан закрывает и порты Xray (BAN_SCOPE=all)" "за одним IP мобильного оператора — тысячи абонентов; лучше: fail2detect config BAN_SCOPE except-xray"
+        else
+            _chk ok "Бан не закрывает порты Xray — абоненты за общим IP (CGNAT) не страдают"
+        fi
+    fi
 
     title "Открытые порты"
     local pub; pub=" $(fw_public_tcp) "

@@ -46,7 +46,7 @@ ${C_BOLD}Установка Remnawave${C_RESET}
 ${C_BOLD}Баны и журнал${C_RESET}
   bans                      активные баны
   ban <ip> [срок]           забанить вручную (1h, 7d, 0 = навсегда)
-  unban <ip>                разбанить
+  unban <ip>|all            разбанить IP или снять все баны
   log [-n N] [--ip IP] [--jail J] [--action BAN|UNBAN] [--today]
   stats                     статистика банов
   trust add|del|list [ip]   белый список
@@ -349,7 +349,8 @@ main() {
         bans)       ban_list;;
         ban)        require_root; [[ -n "${1:-}" ]] || die "fail2detect ban <ip> [срок]"
                     ban_add "$1" "$(to_seconds "${2:-1d}")" manual "${3:-вручную}";;
-        unban)      require_root; [[ -n "${1:-}" ]] || die "fail2detect unban <ip>"; ban_remove "$1";;
+        unban)      require_root; [[ -n "${1:-}" ]] || die "fail2detect unban <ip>|all"
+                    if [[ "$1" == all || "$1" == --all ]]; then ban_flush; else ban_remove "$1"; fi;;
         log|audit)  audit_show "$@";;
         stats)      audit_stats;;
         trust)      require_root

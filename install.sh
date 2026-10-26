@@ -70,6 +70,8 @@ if [[ "$MODE" == --update ]]; then
         install -m 644 "$DEST/systemd/$u" "/etc/systemd/system/$u"
     done
     systemctl daemon-reload
+    # пересобрать блок-листы новой версией (например, без «government» с мобильными пулами)
+    "$DEST/fail2detect" blocklist update >/dev/null 2>&1 || true
     systemctl is-enabled --quiet fail2detect 2>/dev/null && systemctl restart fail2detect
     green "fail2detect обновлён до $("$DEST/fail2detect" version)"
     exit 0

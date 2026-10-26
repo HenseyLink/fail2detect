@@ -134,8 +134,10 @@ ban_add() {
         audit_write IGNORE "$ip" "$jail" - "не забанен: $why; $reason"
         return 0
     fi
-    # уже забанен (несколько строк лога об одном и том же) — не дублируем
-    if [[ "$mode" == record ]] && awk -F'\t' -v ip="$ip" -v t="$(now)" '$1==ip && ($2==0 || $2>t){f=1} END{exit !f}' "$F2D_BANS_DB" 2>/dev/null; then
+    # уже забанен (несколько строк лога об одном и том же пришли раньше, чем
+    # бан вступил в силу) — не дублируем и не продлеваем: раньше так за секунду
+    # получалось 1 → 2 → 4 дня
+    if awk -F'\t' -v ip="$ip" -v t="$(now)" '$1==ip && ($2==0 || $2>t){f=1} END{exit !f}' "$F2D_BANS_DB" 2>/dev/null; then
         return 0
     fi
     # повторные баны — дольше (как bantime.increment в fail2ban)
@@ -168,6 +170,15 @@ ban_remove() {   # ip [quiet]
     else
         [[ "${2:-}" == quiet ]] || info "$ip не был в списке банов (удалён из nft на всякий случай)"
     fi
+}
+
+ban_flush() {   # снять все баны
+    local n; n=$(awk -F'\t' -v t="$(now)" '$1!="" && ($2==0 || $2>t)' "$F2D_BANS_DB" 2>/dev/null | wc -l)
+    nft flush set inet "$F2D_NFT_TABLE" banned4 2>/dev/null
+    nft flush set inet "$F2D_NFT_TABLE" banned6 2>/dev/null
+    _with_lock bash -c ": > '$F2D_BANS_DB'"
+    audit_write UNBAN all - - "сняты все баны ($n)"
+    ok "Сняты все баны: $n"
 }
 
 ban_list() {
@@ -212,12 +223,12 @@ jail_names() {
 jail_load() {
     local name="$1" f="$F2D_JAIL_DIR/$1.conf"
     [[ -f "$f" ]] || return 1
-    ENABLED=no; SOURCE=""; FILTERS=(); IGNOREREGEX=""; MAXRETRY=5; FINDTIME=10m; BANTIME=1h; ACTION=ban; DESCRIPTION=""
+    ENABLED=no; SOURCE=""; FILTERS=(); IGNOREREGEX=""; MAXRETRY=5; FINDTIME=10m; BANTIME=1h; ACTION=ban; DESCRIPTION=""; DISTINCT=""
     # shellcheck disable=SC1090
     source "$f"
     J_NAME="$name"; J_ENABLED="$ENABLED"; J_SOURCE="$SOURCE"; J_FILTERS=("${FILTERS[@]}")
     J_IGNORE="$IGNOREREGEX"; J_MAXRETRY="$MAXRETRY"; J_FINDTIME=$(to_seconds "$FINDTIME")
-    J_BANTIME=$(to_seconds "$BANTIME"); J_ACTION="$ACTION"; J_DESC="$DESCRIPTION"
+    J_BANTIME=$(to_seconds "$BANTIME"); J_ACTION="$ACTION"; J_DESC="$DESCRIPTION"; J_DISTINCT="$DISTINCT"
 }
 
 jail_set_enabled() {   # name yes|no
@@ -273,13 +284,26 @@ jail_loop() {
         [[ -z "$ip" ]] && continue
         is_private_ip "$ip" && continue   # link-local/мультикаст хостера, локальные сети — тихо мимо
         printf -v t '%(%s)T' -1
-        # окно FINDTIME
+        # DISTINCT: считать не совпадения, а разные значения (например, разные
+        # порты: сканер перебирает порты, «шум» за CGNAT бьёт в одни и те же)
+        local key=""
+        if [[ -n "$J_DISTINCT" ]]; then
+            [[ "$line" =~ $J_DISTINCT ]] && key="${BASH_REMATCH[1]:-}"
+            [[ -n "$key" ]] || continue
+        fi
+        # окно FINDTIME; записи вида «время:значение»
         kept=""; cnt=0
-        for ts in ${hits[$ip]:-}; do (( ts > t - J_FINDTIME )) && { kept+="$ts "; cnt=$((cnt + 1)); }; done
-        kept+="$t"; cnt=$((cnt + 1))
+        local -A uniq=()
+        for ts in ${hits[$ip]:-}; do
+            (( ${ts%%:*} > t - J_FINDTIME )) || continue
+            kept+="$ts "; uniq[${ts#*:}]=1
+        done
+        kept+="$t:$key"; uniq[$key]=1
+        if [[ -n "$J_DISTINCT" ]]; then cnt=${#uniq[@]}; else cnt=$(wc -w <<<"$kept"); fi
+        unset uniq
         if (( cnt >= J_MAXRETRY )); then
             unset 'hits[$ip]'
-            local reason="${cnt} совп. за $(human_duration "$J_FINDTIME"): ${line:0:160}"
+            local reason="${cnt} $([[ -n "$J_DISTINCT" ]] && echo "разных" || echo "совп.") за $(human_duration "$J_FINDTIME"): ${line:0:160}"
             if [[ "$J_ACTION" == record ]]; then
                 ban_add "$ip" "$J_BANTIME" "$name" "$reason" record
             else
@@ -310,6 +334,7 @@ daemon_run() {
     ensure_dirs
     F2D_SELF_IP=$(public_ip 2>/dev/null || true); export F2D_SELF_IP
     nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1 || fw_apply
+    xray_ports_sync
     local name pids=()
     for name in $(jail_names); do
         jail_load "$name" || continue
@@ -326,10 +351,15 @@ daemon_run() {
     audit_write START - - - "демон запущен, jail: $(jail_names | xargs)"
     # сначала снимаем обработчик, иначе kill 0 запускает его в каждом процессе группы
     trap 'trap - TERM INT; audit_write STOP - - - "демон остановлен"; kill 0 2>/dev/null; exit 0' TERM INT
+    local tick=0
     while true; do
-        sleep 600 & wait $!
-        _with_lock ban_prune
-        cert_sync_node 2>/dev/null   # Caddy/certbot продлили сертификат — обновить копию в ноде
+        sleep 30 & wait $!
+        tick=$((tick + 1))
+        xray_ports_sync 2>/dev/null   # новый inbound от панели — сразу открыть его порт
+        if (( tick % 20 == 0 )); then  # раз в 10 минут
+            _with_lock ban_prune
+            cert_sync_node 2>/dev/null   # Caddy/certbot продлили сертификат — обновить копию в ноде
+        fi
     done
 }
 

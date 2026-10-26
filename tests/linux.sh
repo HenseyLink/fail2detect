@@ -158,6 +158,55 @@ for bad in / /etc /opt /root /home "$WORK"; do
     _safe_rmdir "$bad" 2>/dev/null && fail "_safe_rmdir согласился удалить $bad" || pass "_safe_rmdir отказал: $bad"
 done
 
+section "Мобильные абоненты (CGNAT)"
+# portscan: 10 стуков в один порт — не бан; 6 разных портов — бан
+bans=(); ban_add() { bans+=("$1"); }
+# (через < <(…): в конвейере jail_loop шёл бы в подоболочке и баны терялись)
+jail_loop portscan < <(
+    for i in $(seq 1 10); do echo "[UFW BLOCK] IN=eth0 OUT= MAC=aa SRC=95.24.1.1 DST=10.0.0.1 LEN=60 PROTO=TCP SPT=4$i DPT=8080 WINDOW=1 RES=0x00 SYN URGP=0"; done
+    for i in 1 2 3 4 5 6; do echo "[UFW BLOCK] IN=eth0 OUT= MAC=aa SRC=95.24.2.2 DST=10.0.0.1 LEN=60 PROTO=TCP SPT=5 DPT=$((20 + i)) WINDOW=1 RES=0x00 SYN URGP=0"; done
+    for i in 1 2 3 4 5; do echo "[UFW BLOCK] IN=eth0 OUT= MAC=aa SRC=95.24.3.3 DST=10.0.0.1 LEN=60 PROTO=TCP SPT=5 DPT=$((30 + i)) WINDOW=1 RES=0x00 SYN URGP=0"; done
+)
+[[ " ${bans[*]:-} " != *" 95.24.1.1 "* ]] && pass "10 стуков в ОДИН порт (шум за CGNAT) — без бана" || fail "бан за стуки в один порт"
+[[ " ${bans[*]:-} " == *" 95.24.2.2 "* ]] && pass "6 РАЗНЫХ закрытых портов (сканер) — бан" || fail "сканер не забанен" "${bans[*]:-}"
+[[ " ${bans[*]:-} " != *" 95.24.3.3 "* ]] && pass "5 разных портов — ещё без бана" || fail "бан раньше порога"
+unset -f ban_add; source "$ROOT/lib/jail.sh"
+# правила: забаненным открыты порты Xray (except-xray), при all — нет
+NODE_XRAY_PORTS="443/tcp 443/udp"; BAN_SCOPE=except-xray
+r=$(fw_render)
+grep -q 'saddr @banned4 tcp dport @xray_tcp accept' <<<"$r" && grep -q 'set xray_tcp .*443' <<<"$r" && pass "бан не закрывает порты Xray (except-xray)" || fail "except-xray"
+[[ $(grep -n 'saddr @block4 drop' <<<"$r" | head -1 | cut -d: -f1) -lt $(grep -n 'saddr @banned4 tcp dport @xray_tcp' <<<"$r" | cut -d: -f1) ]] \
+    && pass "блок-листы сканеров срабатывают раньше исключения для Xray" || fail "порядок block/banned"
+BAN_SCOPE=all; r=$(fw_render)
+grep -q 'dport @xray_tcp accept' <<<"$r" && fail "BAN_SCOPE=all всё ещё открывает Xray" || pass "BAN_SCOPE=all закрывает всё"
+BAN_SCOPE=except-xray; NODE_XRAY_PORTS=""
+# блок-листы: «government» не грузится, сети шире /16 отбрасываются
+printf '# test\n8.0.0.0/8\n1.2.3.0/24\n5.6.7.8\n2001:db8::/16\n2a01:4f8::/32\n' > "$WORK/bl.txt"
+ensure_dirs; BLOCKLISTS="t government"; BLOCKLIST_URL_t="file://$WORK/bl.txt"; BLOCKLIST_URL_government="file://$WORK/bl.txt"
+blocklist_update >"$WORK/bl.out" 2>&1
+[[ "$(tr '\n' ' ' < "$F2D_STATE_DIR/blocklist4.txt")" == "1.2.3.0/24 5.6.7.8 " ]] && pass "IPv4: /8 отброшен, /24 и /32 оставлены" || fail "фильтр IPv4" "$(cat "$F2D_STATE_DIR/blocklist4.txt")"
+[[ "$(cat "$F2D_STATE_DIR/blocklist6.txt")" == "2a01:4f8::/32" ]] && pass "IPv6: /16 отброшен" || fail "фильтр IPv6" "$(cat "$F2D_STATE_DIR/blocklist6.txt")"
+grep -q 'government пропущен' "$WORK/bl.out" && pass "блок-лист government не загружается" || fail "government загружен"
+BLOCKLISTS="antiscanner skipa"; : > "$F2D_STATE_DIR/blocklist4.txt"; : > "$F2D_STATE_DIR/blocklist6.txt"
+
+section "Порты Xray не выпадают из разрешённых"
+xp_save="$NODE_XRAY_PORTS"; config_set NODE_XRAY_PORTS "443/tcp 2053/udp"
+detect_xray_ports() { :; }; detect_xray_udp_ports() { :; }   # Xray как раз перезапускается
+[[ " $(fw_public_tcp) " == *" 443 "* && " $(fw_public_udp) " == *" 2053 "* ]] && pass "известные порты открыты, даже пока Xray не слушает" || fail "известные порты" "tcp=$(fw_public_tcp) udp=$(fw_public_udp)"
+nftlog="$WORK/nft.log"; : > "$nftlog"
+nft() { echo "nft $*" >> "$nftlog"; }
+detect_xray_ports() { echo "443 9443"; }; detect_xray_udp_ports() { echo "443"; }   # панель прислала новые inbound'ы
+xray_ports_sync >/dev/null 2>&1; load_config
+[[ " $NODE_XRAY_PORTS " == *" 9443/tcp "* && " $NODE_XRAY_PORTS " == *" 443/udp "* ]] && pass "новые порты Xray запомнены: $NODE_XRAY_PORTS" || fail "новые порты" "$NODE_XRAY_PORTS"
+grep -q 'add element inet fail2detect pub_tcp { 9443 }' "$nftlog" && grep -q 'pub_udp { 443 }' "$nftlog" && pass "новые порты сразу открыты в фаерволе" || fail "открытие портов" "$(cat "$nftlog")"
+: > "$nftlog"; xray_ports_sync >/dev/null 2>&1; [[ ! -s "$nftlog" ]] && pass "повторная проверка ничего не трогает" || fail "повтор трогает nft"
+# три строки лога об одном IP подряд — один бан, срок не растёт
+: > "$F2D_BANS_DB"; for i in 1 2 3; do ban_add 79.139.188.244 86400 portscan "тест" >/dev/null; done
+[[ "$(grep -c 'add element' "$nftlog")" == 1 && "$(awk -F'\t' '$2=="BAN" && $3=="79.139.188.244"' "$F2D_AUDIT_LOG" | wc -l | tr -d ' ')" == 1 ]] \
+    && pass "три лога подряд — один бан, без 1→2→4 дней" || fail "эскалация бана" "$(grep -c 'add element' "$nftlog")"
+unset -f nft detect_xray_ports detect_xray_udp_ports; source "$ROOT/lib/detect.sh"
+config_set NODE_XRAY_PORTS "$xp_save"; load_config; : > "$F2D_BANS_DB"
+
 section "Вопросы и e-mail для сертификата"
 REPLY="me@example.com"; confirm "ok?" n < <(printf 'y\n') >/dev/null 2>&1
 [[ "$REPLY" == me@example.com ]] && pass "confirm не затирает введённое ранее (REPLY)" || fail "confirm затёр REPLY" "$REPLY"
@@ -206,7 +255,8 @@ else
             for icmp in yes no; do
                 for dg in yes no; do
                     STUB_MODE=$mode FLOOD_GUARD=$flood
-                    STEALTH_ICMP=$icmp DOCKER_GUARD=$dg
+                    STEALTH_ICMP=$icmp DOCKER_GUARD=$dg NODE_XRAY_PORTS="443/tcp 443/udp 8443/tcp"
+                    [[ $dg == yes ]] && BAN_SCOPE=except-xray || BAN_SCOPE=all
                     fw_render > "$WORK/r.nft"
                     if out=$(nft -c -f "$WORK/r.nft" 2>&1); then
                         pass "mode=$mode flood=$flood icmp=$icmp docker_guard=$dg"
@@ -263,6 +313,11 @@ else
     t=$(nft -j list set inet fail2detect banned4 | jq -r '.nftables[].set.elem // empty | .[] | select(.elem.val=="45.9.9.9") | .elem.timeout')
     [[ "$t" == 600 ]] && pass "повторный бан вдвое дольше (600 с)" || fail "повторный бан вдвое дольше" "timeout=$t"
 
+    ban_add 45.6.6.6 300 test "x" >/dev/null; ban_add 45.6.6.7 300 test "x" >/dev/null
+    ban_flush >/dev/null
+    [[ -z "$(nft -j list set inet fail2detect banned4 | jq -r '.nftables[].set.elem // empty | .[]')" && ! -s "$F2D_BANS_DB" ]] \
+        && pass "unban all снимает все баны" || fail "unban all"
+    ban_add 45.9.9.9 300 test "повтор после flush" >/dev/null
     ban_remove 45.9.9.9 quiet
     nft list set inet fail2detect banned4 | grep -q '45.9.9.9' && fail "разбан" || pass "разбан убирает IP из nft"
     awk -F'\t' '$2=="UNBAN" && $3=="45.9.9.9"' "$F2D_AUDIT_LOG" | grep -q . && pass "разбан записан в аудит" || fail "разбан записан в аудит"

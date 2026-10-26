@@ -167,6 +167,7 @@ config_defaults() {
     TRUSTED_IPS=""              # белый список (админ, мониторинг)
     STEALTH_ICMP="yes"          # не отвечать на ping
     DOCKER_GUARD="yes"          # не пускать извне в опубликованные docker-порты
+    BAN_SCOPE="except-xray"     # except-xray — бан не закрывает порты Xray (CGNAT мобильных); all — закрывает всё
     FLOOD_GUARD="no"            # бан за шквал новых соединений
     FLOOD_RATE="600/minute"     # осторожно: CGNAT мобильных операторов
     FLOOD_BANTIME="10m"
