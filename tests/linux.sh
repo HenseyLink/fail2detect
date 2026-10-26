@@ -191,6 +191,7 @@ BLOCKLISTS="antiscanner skipa"; : > "$F2D_STATE_DIR/blocklist4.txt"; : > "$F2D_S
 
 section "Порты Xray не выпадают из разрешённых"
 xp_save="$NODE_XRAY_PORTS"; config_set NODE_XRAY_PORTS "443/tcp 2053/udp"
+stubs_save=$(declare -f detect_xray_ports detect_xray_udp_ports)   # вернуть после теста
 detect_xray_ports() { :; }; detect_xray_udp_ports() { :; }   # Xray как раз перезапускается
 [[ " $(fw_public_tcp) " == *" 443 "* && " $(fw_public_udp) " == *" 2053 "* ]] && pass "известные порты открыты, даже пока Xray не слушает" || fail "известные порты" "tcp=$(fw_public_tcp) udp=$(fw_public_udp)"
 nftlog="$WORK/nft.log"; : > "$nftlog"
@@ -204,7 +205,7 @@ grep -q 'add element inet fail2detect pub_tcp { 9443 }' "$nftlog" && grep -q 'pu
 : > "$F2D_BANS_DB"; for i in 1 2 3; do ban_add 79.139.188.244 86400 portscan "тест" >/dev/null; done
 [[ "$(grep -c 'add element' "$nftlog")" == 1 && "$(awk -F'\t' '$2=="BAN" && $3=="79.139.188.244"' "$F2D_AUDIT_LOG" | wc -l | tr -d ' ')" == 1 ]] \
     && pass "три лога подряд — один бан, без 1→2→4 дней" || fail "эскалация бана" "$(grep -c 'add element' "$nftlog")"
-unset -f nft detect_xray_ports detect_xray_udp_ports; source "$ROOT/lib/detect.sh"
+unset -f nft detect_xray_ports detect_xray_udp_ports; eval "$stubs_save"   # заглушки теста, а не настоящий detect.sh
 config_set NODE_XRAY_PORTS "$xp_save"; load_config; : > "$F2D_BANS_DB"
 
 section "Вопросы и e-mail для сертификата"
