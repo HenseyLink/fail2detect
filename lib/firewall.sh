@@ -403,6 +403,40 @@ trust_add() {
 trust_del() { list_del TRUSTED_IPS "$1"; audit_write UNTRUST "$1" - - "удалён из белого списка"; fw_apply; }
 
 # ---------- блок-листы сканеров ----------
+# «government» (shadow-netlab) — сети госорганов и аффилированных организаций
+# из реестра RIPE. Кроме самих организаций туда попадают абонентские пулы
+# операторов (GPRS-сети, клиентские сети), CDN (NGENIX) и защита от DDoS
+# (Qrator) — через них ходят обычные пользователи. Фильтр выкидывает блоки с
+# такими подписями и все подсети крупнее /GOV_MAXLEN (своя сеть госоргана
+# почти всегда меньше). Ошибается в безопасную сторону: лучше не заблокировать
+# госорган, чем отрезать абонентов.
+GOV_MAXLEN="${GOV_MAXLEN:-22}"
+gov_filter() {   # stdin — список government, stdout — безопасные подсети; итог — в stderr
+    # name — подпись сети (AS-Name: USI_GPRS_USERS1, NGENIX-MTS-NET…): по ней
+    #   ловим и «мягкие» признаки (client, users, broadband…);
+    # desc — описание организации: только однозначные признаки, потому что у
+    #   прокуратуры или таможни там пишут «…Fixed broadband» провайдера.
+    awk -v maxlen="$GOV_MAXLEN" '
+        BEGIN {
+            badname = "gprs|users|subscrib|abonent|customer|client|mobile|cellular|lte|wi-?fi|pppoe|dhcp|dynamic|broadband|dsl|fttb|fttx|gpon|cgn|nat|pool|ngenix|qrator|ddos|cdn|hosting|cloud|datacenter|colo"
+            baddesc = "gprs|ngenix|qrator|ddos|[^a-z]cdn|content delivery|pppoe|dhcp|cgn|nat pool|subscribers|abonent|hosting|data ?center|colocation"
+        }
+        /^#/ {
+            if (seen) { name = ""; desc = ""; seen = 0 }
+            line = tolower($0)
+            if (line ~ /^# *as-name:/) name = name " " line; else desc = desc " " line
+            next
+        }
+        /^[[:space:]]*$/ { next }
+        /^[0-9a-fA-F:.]+(\/[0-9]+)?[[:space:]]*$/ {
+            seen = 1; p = $1; n = split(p, a, "/"); len = (n < 2 ? (p ~ /:/ ? 128 : 32) : a[2]) + 0
+            if (p ~ /:/) { if (len < 32) { wide++; next } }
+            else if (len < maxlen) { wide++; next }
+            if (name ~ badname || desc ~ baddesc) { dropped++; next }
+            print p; kept++
+        }
+        END { printf "government: оставлено %d подсетей, убрано %d (абонентские пулы/CDN) и %d (крупнее /%d)\n", kept, dropped, wide, maxlen > "/dev/stderr" }'
+}
 blocklist_update() {
     ensure_dirs
     local name url tmp4 tmp6 total=0
@@ -411,14 +445,14 @@ blocklist_update() {
         # «government» содержит не только сети госорганов, но и мобильные пулы
         # (USI_GPRS_USERS, UTEL_GPRS_NET, части T2/Мегафона) и CDN — с ним
         # абоненты мобильных операторов не могут подключиться к ноде
-        if [[ "$name" == government && "${BLOCKLIST_GOVERNMENT_FORCE:-no}" != yes ]]; then
-            warn "Блок-лист government пропущен: в нём пулы мобильных абонентов (GPRS-сети Ростелекома, T2, Мегафона) — клиенты с мобильного интернета теряли доступ."
-            warn "Уберите его: fail2detect config BLOCKLISTS \"antiscanner skipa\" (принудительно: BLOCKLIST_GOVERNMENT_FORCE=yes)"
-            continue
-        fi
         url="BLOCKLIST_URL_${name}"; url="${!url:-}"
         [[ -n "$url" ]] || { warn "Блок-лист $name: нет URL (BLOCKLIST_URL_$name)"; continue; }
         local raw; raw=$(curl -fsSL --max-time 30 "$url" 2>/dev/null) || { warn "Блок-лист $name: не скачался"; continue; }
+        # government — только через фильтр абонентских пулов (без фильтра: BLOCKLIST_GOVERNMENT_RAW=yes)
+        if [[ "$name" == government && "${BLOCKLIST_GOVERNMENT_RAW:-no}" != yes ]]; then
+            local fmsg; fmsg=$(mktemp)
+            raw=$(gov_filter <<<"$raw" 2>"$fmsg"); info "$(cat "$fmsg")"; rm -f "$fmsg"
+        fi
         local n4 n6
         # только строки, похожие на IP/CIDR; комментарии и мусор отбрасываем
         n4=$(printf '%s\n' "$raw" | sed 's/#.*//' | grep -oE '^[[:space:]]*[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | tr -d ' \t' | tee -a "$tmp4" | wc -l)

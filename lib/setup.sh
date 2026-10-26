@@ -81,10 +81,12 @@ setup_wizard() {
     if confirm "Подключить блок-листы сканеров РКН/«Скипа» (antiscanner, skipa)?" y; then
         config_set BLOCKLISTS "antiscanner skipa"
     else config_set BLOCKLISTS ""; fi
-    # список «government» больше не предлагаем: в нём пулы мобильных абонентов
-    if [[ " $BLOCKLISTS " == *" government "* ]]; then
-        warn "Подключён блок-лист government — в нём пулы мобильных абонентов (клиенты с мобильного интернета не подключаются)."
-        confirm "Отключить его (рекомендуется)?" y && list_del BLOCKLISTS government
+    echo "  Сети госорганов РФ (government): блокировать адреса госорганизаций. Абонентские"
+    echo "  пулы операторов, CDN и сети крупнее /${GOV_MAXLEN} из него вырезаются автоматически."
+    if confirm "Блокировать также сети госорганов (government)?" n; then
+        list_add BLOCKLISTS government
+    else
+        list_del BLOCKLISTS government
     fi
     if confirm "Не отвечать на ping (скрыть сервер от массовых сканеров)?" y; then
         config_set STEALTH_ICMP yes
@@ -132,7 +134,11 @@ doctor() {
     [[ -s "$F2D_STATE_DIR/blocklist4.txt" ]] && _chk ok "Блок-листы сканеров: $(wc -l < "$F2D_STATE_DIR/blocklist4.txt") сетей" || _chk warn "Блок-листы сканеров не загружены" "fail2detect blocklist update"
     [[ "$STEALTH_ICMP" == yes ]] && _chk ok "Сервер не отвечает на ping" || _chk warn "Сервер отвечает на ping"
     if [[ " $BLOCKLISTS " == *" government "* ]]; then
-        _chk bad "Подключён блок-лист government — в нём пулы мобильных абонентов" "клиенты с мобильного интернета не подключаются: fail2detect config BLOCKLISTS \"antiscanner skipa\""
+        if [[ "${BLOCKLIST_GOVERNMENT_RAW:-no}" == yes ]]; then
+            _chk bad "Блок-лист government БЕЗ фильтра — в нём пулы мобильных абонентов и CDN" "уберите BLOCKLIST_GOVERNMENT_RAW=yes: fail2detect config BLOCKLIST_GOVERNMENT_RAW no"
+        else
+            _chk ok "Блок-лист government — с фильтром абонентских пулов и CDN"
+        fi
     fi
     if has_node; then
         if [[ "${BAN_SCOPE:-except-xray}" == all ]]; then

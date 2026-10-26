@@ -183,13 +183,18 @@ grep -q 'saddr @banned4 tcp dport @xray_tcp accept' <<<"$r" && grep -q 'set xray
 BAN_SCOPE=all; r=$(fw_render)
 grep -q 'dport @xray_tcp accept' <<<"$r" && fail "BAN_SCOPE=all всё ещё открывает Xray" || pass "BAN_SCOPE=all закрывает всё"
 BAN_SCOPE=except-xray; NODE_XRAY_PORTS=""
-# блок-листы: «government» не грузится, сети шире /16 отбрасываются
+# блок-листы: сети шире /16 отбрасываются, government идёт через фильтр
 printf '# test\n8.0.0.0/8\n1.2.3.0/24\n5.6.7.8\n2001:db8::/16\n2a01:4f8::/32\n' > "$WORK/bl.txt"
 ensure_dirs; BLOCKLISTS="t government"; BLOCKLIST_URL_t="file://$WORK/bl.txt"; BLOCKLIST_URL_government="file://$WORK/bl.txt"
+# (government здесь — тот же тестовый файл без подписей: фильтр пропускает /24 и /32)
 blocklist_update >"$WORK/bl.out" 2>&1
 [[ "$(tr '\n' ' ' < "$F2D_STATE_DIR/blocklist4.txt")" == "1.2.3.0/24 5.6.7.8 " ]] && pass "IPv4: /8 отброшен, /24 и /32 оставлены" || fail "фильтр IPv4" "$(cat "$F2D_STATE_DIR/blocklist4.txt")"
 [[ "$(cat "$F2D_STATE_DIR/blocklist6.txt")" == "2a01:4f8::/32" ]] && pass "IPv6: /16 отброшен" || fail "фильтр IPv6" "$(cat "$F2D_STATE_DIR/blocklist6.txt")"
-grep -q 'government пропущен' "$WORK/bl.out" && pass "блок-лист government не загружается" || fail "government загружен"
+grep -q '1.2.3.0/24' "$F2D_STATE_DIR/blocklist4.txt" && pass "government загружается (через фильтр)" || fail "government"
+# фильтр government: абонентские пулы, CDN, Qrator и крупные сети — прочь; госорганы — остаются
+gout=$(gov_filter < "$ROOT/tests/fixtures/government-sample.list" 2>/dev/null)
+[[ "$(tr '\n' ' ' <<<"$gout")" == "37.29.55.192/30 195.98.43.104/29 " ]] \
+    && pass "government: остались прокуратура и МВД, убраны GPRS-пул, NGENIX, Qrator, /19" || fail "фильтр government" "$(tr '\n' ' ' <<<"$gout")"
 BLOCKLISTS="antiscanner skipa"; : > "$F2D_STATE_DIR/blocklist4.txt"; : > "$F2D_STATE_DIR/blocklist6.txt"
 
 section "Порты Xray не выпадают из разрешённых"

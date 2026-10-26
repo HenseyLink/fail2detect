@@ -1,0 +1,31 @@
+# Networks announced by AS12389
+# AS-Name: USI_GPRS_USERS1
+# Org: MFIST
+# GPRS service for MRFSS
+89.204.112.0/20
+88.205.192.0/20
+
+# AS-Name: NGENIX-MTS-NET
+# Network for NGENIX, Moscow MTS
+195.208.66.0/24
+
+# Networks announced by AS51115
+# AS-Name: QRATOR-10710
+# FGUP MIA "Rossia segodna"
+178.248.234.210/32
+
+# Networks announced by AS31213,AS20632
+# AS-Name: PROKURATURA-NOV-LAN
+# Prokuratura-NOV
+# North-West Branch of OJSC MegaFon Network, Fixed broadband
+37.29.55.192/30
+
+# Networks announced by AS8371
+# AS-Name: AA-NES
+# FGUP Ohrana of MVD of RF
+195.98.43.104/29
+
+# Networks announced by AS20702
+# AS-Name: RU-CSS-RZD-20010418
+# RZD
+217.175.128.0/19
