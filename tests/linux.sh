@@ -363,6 +363,8 @@ unset -f docker rw_latest_release; eval "$sync_saved"
 source "$ROOT/lib/update.sh"
 
 section "Speedtest"
+# ширину считаем в символах, как в самом fail2detect (он включает UTF-8 локаль сам)
+st_lc_saved="${LC_ALL:-}"; export LC_ALL=C.UTF-8
 st=$(printf '%s\n' 10 20 30 40 50 | st_stats)
 [[ "$st" == "5 30.00 30.00 20.00 40.00 48.00 10.00 50.00 15.81" ]] && pass "перцентили с интерполяцией, джиттер = ст. отклонение" || fail "st_stats" "$st"
 [[ "$(printf '%s\n' 7 | st_stats)" == "1 7.00 7.00 7.00 7.00 7.00 7.00 7.00 0.00" ]] && pass "одно значение" || fail "st_stats n=1"
@@ -413,6 +415,7 @@ grep -q 'Bufferbloat   A ' <<<"$out" && grep -q 'Приемлемо' <<<"$out" &
 (( $(tail -n +3 <<<"$out" | max_width) <= 120 )) && pass "итоговый экран не шире 120 колонок" || fail "ширина экрана" "$(tail -n +3 <<<"$out" | max_width)"
 out=$(COLUMNS=80 st_render 10 10 yes | sed 's/\x1b\[[0-9;]*m//g')
 (( $(tail -n +3 <<<"$out" | max_width) <= 80 )) && pass "узкий терминал (80): панели друг под другом" || fail "ширина 80" "$(tail -n +3 <<<"$out" | max_width)"
+if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
