@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave installer remove setup ipquality geocheck speedtest; do
+for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -66,6 +66,9 @@ ${C_BOLD}Нода Remnawave${C_RESET}
   node transport [tag]      сменить транспорт и/или порт у работающей ноды
   node add-transport [tag]  добавить к ноде запасные транспорты (например Hysteria2 + gRPC + XHTTP)
   node port <порт> [tag]    только перенести Xray-inbound на другой порт
+  balancer [status|setup|add|add-wl|remove]
+                            запись «⚡ Авто» в подписке Xray JSON: клиент сам выбирает лучшую
+                            по пингу ноду, при белых списках — уходит на мост (тег F2D_WL)
   node prepare --transport T --port P [--domain D] [--target host:port] [--close P/proto]
                             подготовить сервер ноды к транспорту (сертификат, сайт, фаервол)
   node inbound-json <транспорт> <порт> [домен] [target]
@@ -253,6 +256,7 @@ menu_node() {
         menu_item 5 "Сменить API-порт ноды (NODE_PORT)"
         menu_item 6 "Включить лог Xray (jail reality)"
         menu_item 7 "Добавить запасные транспорты к ноде"
+        menu_item 8 "Балансировщик «Авто» (лучшая нода по пингу, белые списки)"
         menu_item 0 "Назад"
         ask "Выбор" ""
         case "$REPLY" in
@@ -263,10 +267,25 @@ menu_node() {
             5) ask "Новый NODE_PORT"; node_api_port_change "$REPLY";;
             6) node_logs_enable;;
             7) node_transport_add;;
+            8) menu_balancer;;
             0|q|"") return;;
         esac
         pause
     done
+}
+
+menu_balancer() {
+    balancer_status
+    echo
+    menu_item 1 "Настроить (выбрать ноды пула и мосты для белых списков)"
+    menu_item 2 "Добавить ноды в пул"
+    menu_item 3 "Добавить мост для белых списков"
+    menu_item 4 "Убрать балансировщик"
+    menu_item 0 "Назад"
+    ask "Выбор" ""
+    case "$REPLY" in
+        1) balancer_setup;; 2) balancer_add;; 3) balancer_add wl;; 4) balancer_remove;;
+    esac
 }
 
 menu_install() {
@@ -391,6 +410,7 @@ main() {
                         logs) node_logs_enable;;
                         *) die "node add|transport|add-transport|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
+        balancer|bal) balancer_cli "${1:-status}";;
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;
         speed|speedtest)

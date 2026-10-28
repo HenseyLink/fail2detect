@@ -517,6 +517,7 @@ install_node() {
         info "Создайте в панели профиль с этими inbound'ами (или используйте автоматический режим):"
         for t in "${T_LIST[@]}"; do echo "    fail2detect node inbound-json $t ${T_PORTS[$t]} ${T_DOMAIN:-\"\"} ${T_TARGET}"; done
     fi
+    [[ "$mode" == auto && -n "${NODE_UUID:-}" ]] && balancer_offer "$name"
     echo
     confirm "Настроить защиту fail2detect сейчас?" y && setup_wizard
 }
@@ -538,6 +539,7 @@ node_add() {   # [address]
     [[ -n "$T_TARGET" ]] && printf ' --target %s' "$T_TARGET"
     [[ -n "$T_OBFS" ]] && printf ' --obfs %s' "$T_OBFS"
     echo
+    balancer_offer "$name"
 }
 
 # нода на сервере панели (вызывается из install_panel)

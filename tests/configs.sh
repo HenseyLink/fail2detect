@@ -61,6 +61,24 @@ profile_config "$inb" > "$WORK/ext.json"
 docker run --rm -v "$WORK/ext.json:/c.json:ro" "$XRAY_IMAGE" run -test -c /c.json >/dev/null 2>&1 \
     && pass "xray: tcp-reality с внешним target" || fail "xray: tcp-reality с внешним target"
 
+# балансировщик: шаблон подписки Xray JSON, в который панель подставит хосты
+# (здесь — как это сделает Remnawave: outbound'ы proxy, proxy-2, wl)
+source "$ROOT/lib/balancer.sh"
+vless() {   # tag
+    jq -n --arg t "$1" --arg id "$uuid" '{tag:$t, protocol:"vless", settings:{vnext:[{address:"203.0.113.10", port:443,
+        users:[{id:$id, encryption:"none", flow:"xtls-rprx-vision"}]}]}, streamSettings:{network:"raw", security:"reality",
+        realitySettings:{serverName:"www.example.com", fingerprint:"chrome", publicKey:"nT0eWyNk7hS8DM-FdyJ5b8oA9i4X8kTpo6hZ8aRL2Hk", shortId:"ab"}}}'
+}
+for wl in no yes; do
+    outs=$( { vless proxy; vless proxy-2; vless proxy-3; [[ $wl == no ]] || vless wl; } | jq -s '.')
+    balancer_template_json "" "$wl" | jq --argjson o "$outs" 'del(.remnawave) | .outbounds = $o + .outbounds' > "$WORK/bal-$wl.json"
+    if res=$(docker run --rm -v "$WORK/bal-$wl.json:/c.json:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
+        pass "xray: балансировщик (мосты для белых списков: $wl)"
+    else
+        fail "xray: балансировщик (мосты: $wl)" "$(tail -5 <<<"$res")"
+    fi
+done
+
 printf '\n== nginx (%s)\n' "$NGINX_IMAGE"
 LE="$WORK/le/live"
 for d in panel.example.com sub.example.com node.example.com; do mkcert "$LE/$d" "$d"; done

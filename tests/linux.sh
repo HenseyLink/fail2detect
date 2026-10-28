@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave installer remove setup ipquality; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -249,6 +249,33 @@ section "Адрес API панели"
     && pass "ссылка входа → адрес + cookie" || fail "ссылка входа" "$(rw_parse_url 'https://panel.example.com/auth/login?zDXqulmc=ZAKdtFMm')"
 [[ "$(rw_parse_url 'https://panel.example.com/')" == $'https://panel.example.com\t' ]] && pass "голый адрес не меняется" || fail "голый адрес"
 [[ "$(rw_parse_url 'http://127.0.0.1:3000')" == $'http://127.0.0.1:3000\t' ]] && pass "локальный API с портом" || fail "локальный API с портом"
+
+section "Балансировщик"
+def='{"routing":{"rules":[{"type":"field","network":"tcp,udp","outboundTag":"proxy"},{"domain":["geosite:private"],"outboundTag":"direct"}]},"outbounds":[{"tag":"proxy","protocol":"vless"},{"tag":"direct","protocol":"freedom"}]}'
+t=$(balancer_template_json "$def" no)
+[[ $(jq -c '.routing.rules' <<<"$t") == '[{"domain":["geosite:private"],"outboundTag":"direct"},{"network":"tcp,udp","balancerTag":"auto"}]' ]] \
+    && pass "правила Default сохранены, «всё → proxy» заменено балансировщиком" || fail "правила шаблона" "$(jq -c '.routing.rules' <<<"$t")"
+jq -e '.outbounds | map(.tag) == ["direct"]' >/dev/null <<<"$t" && pass "тег proxy оставлен подставленным хостам" || fail "outbound proxy из Default"
+jq -e '.remnawave.injectHosts == [{"selector":{"type":"tagRegex","pattern":"^F2D_BAL$"},"selectFrom":"ALL","tagPrefix":"proxy"}]
+    and .routing.balancers[0].fallbackTag == "proxy" and .routing.balancers[0].strategy.type == "leastLoad"' >/dev/null <<<"$t" \
+    && pass "без мостов: пул по тегу F2D_BAL, fallback — proxy" || fail "шаблон без мостов"
+t=$(balancer_template_json "" yes)
+jq -e '(.remnawave.injectHosts | map(.tagPrefix)) == ["proxy","wl"] and .burstObservatory.subjectSelector == ["proxy","wl"]
+    and .routing.balancers[0].selector == ["proxy"] and .routing.balancers[0].fallbackTag == "wl"' >/dev/null <<<"$t" \
+    && pass "белые списки: мосты пингуются, но трафик на них — только когда пул молчит" || fail "шаблон с мостами"
+# панель-заглушка: теги хостов
+API_LOG="$WORK/api.log"; : > "$API_LOG"
+HOSTS='{"response":[{"uuid":"h1","remark":"de1 · TCP Reality","address":"1.1.1.1","port":443,"tags":["EU"],"inbound":{}},
+  {"uuid":"h2","remark":"de1 · Hysteria 2","address":"1.1.1.1","port":443,"tags":["F2D_BAL"],"inbound":{}},
+  {"uuid":"h3","remark":"fi1 · TCP Reality","address":"2.2.2.2","port":443,"tags":[],"inbound":{}}]}'
+rw_api() { echo "$1 $2 ${3:-}" >> "$API_LOG"; if [[ "$1" == GET ]]; then echo "$HOSTS"; else echo '{"response":{"uuid":"x"}}'; fi; }
+balancer_tag_node_hosts de1 >/dev/null 2>&1
+grep -q 'PATCH /api/hosts {"uuid":"h1","tags":\["EU","F2D_BAL"\]}' "$API_LOG" && pass "хосты новой ноды получают тег F2D_BAL (старые теги целы)" || fail "тег новой ноды" "$(cat "$API_LOG")"
+grep -q '"h2"' "$API_LOG" && fail "повторно помечен уже помеченный хост" || pass "уже помеченный хост не трогается"
+grep -q '"h3"' "$API_LOG" && fail "помечен хост чужой ноды" || pass "хосты других нод не трогаются"
+: > "$API_LOG"; bal_set_tag h2 F2D_BAL del
+grep -q '{"uuid":"h2","tags":\[\]}' "$API_LOG" && pass "тег снимается" || fail "снятие тега" "$(cat "$API_LOG")"
+unset -f rw_api; source "$ROOT/lib/remnawave.sh"
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

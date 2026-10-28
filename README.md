@@ -163,6 +163,26 @@ API-токен берётся в таком порядке:
 
 После смены порта или транспорта клиентам нужно обновить подписку.
 
+### 5a. Балансировщик «Авто» и белые списки
+
+В подписке появляется одна запись «⚡ Авто». Клиент сам пингует все ноды пула каждые 30 секунд и держит трафик на двух лучших, выбирая между ними случайно (`burstObservatory` + `leastLoad`).
+
+```bash
+fail2detect balancer setup     # выбрать ноды пула и мосты для белых списков
+fail2detect balancer add       # добавить ноды в пул
+fail2detect balancer add-wl    # добавить мост для белых списков
+fail2detect balancer           # состояние
+fail2detect balancer remove    # убрать (ноды и хосты остаются)
+```
+
+После `install node` и `node add` fail2detect сам предложит включить новую ноду в балансировщик.
+
+Как это устроено:
+- Ноды пула — хосты с тегом `F2D_BAL`. Ноду можно добавить и из панели: поставьте хосту этот тег. Перенастраивать ничего не нужно.
+- Мосты для белых списков — хосты с тегом `F2D_WL`, например сервер в разрешённой сети. Пока ноды пула отвечают, трафик через мосты не идёт. Когда оператор включает белые списки, зарубежные ноды перестают отвечать на пинг, и клиент сам уходит на мост. Когда списки снимают, клиент возвращается.
+- Всё собрано штатными средствами Remnawave: шаблон подписки XRAY_JSON «fail2detect Auto» (на основе Default, с `remnawave.injectHosts` по тегам) и хост-обёртка.
+- Запись «Авто» видят только клиенты с подпиской Xray JSON: v2rayNG, Happ, Streisand и подобные. В остальных форматах подписки она скрыта, там клиенты видят обычный список хостов.
+
 ### 6. GeoCheck, IPQuality и Cloudflare Speedtest
 
 ```bash
@@ -239,7 +259,7 @@ fail2detect speed --tui       # полноэкранная проверка, с�
 ## Благодарности
 
 - [fail2ban](https://github.com/fail2ban/fail2ban) — идея и модель jail'ов
-- [eGamesAPI/remnawave-reverse-proxy](https://github.com/eGamesAPI/remnawave-reverse-proxy) — вдохновение для установщика
+- [eGamesAPI/remnawave-reverse-proxy](https://github.com/eGamesAPI/remnawave-reverse-proxy) — вдохновение для установщика и клиентского балансировщика
 - [shadow-netlab/traffic-guard-lists](https://github.com/shadow-netlab/traffic-guard-lists), [tread-lightly/CyberOK_Skipa_ips](https://github.com/tread-lightly/CyberOK_Skipa_ips) — списки сканеров
 - [Remnawave](https://github.com/remnawave) — официальные compose-файлы для установки
 - [vernette/ipregion](https://github.com/vernette/ipregion) — способы определения регионов для GeoCheck
