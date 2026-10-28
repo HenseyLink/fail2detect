@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest; do
+for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -95,7 +95,11 @@ ${C_BOLD}Сеть${C_RESET}
 
 ${C_BOLD}Прочее${C_RESET}
   config <KEY> [VALUE]      показать/изменить параметр
-  update                    обновить fail2detect
+  update [--check]          обновить fail2detect (--check — только проверить)
+  rw versions               версии панели, нод и подписки Remnawave и последние релизы
+  rw update [panel|node|sub|all]
+                            обновить Remnawave на этом сервере до свежих образов
+                            (не зависит от версии fail2detect; перед панелью — дамп базы)
   uninstall                 удалить fail2detect
   version
 EOF
@@ -159,6 +163,7 @@ EOF
     bans=$(awk -F'\t' -v t="$(now)" '$1!="" && ($2==0 || $2>t)' "$F2D_BANS_DB" 2>/dev/null | wc -l)
     local d="${C_RED}остановлен${C_RESET}"; systemctl is-active --quiet fail2detect 2>/dev/null && d="${C_GREEN}работает${C_RESET}"
     printf '  Роль: %s%s%s · Демон: %s · Баны: %s%s%s\n' "$C_WHITE" "$(server_role)" "$C_RESET" "$d" "$C_RED" "$bans" "$C_RESET"
+    [[ -n "${F2D_NEW_VERSION:-}" ]] && printf '  %s↑ Доступен fail2detect %s — пункт 11 «Обновления»%s\n' "$C_YELLOW" "$F2D_NEW_VERSION" "$C_RESET"
     hr 62
 }
 
@@ -310,6 +315,12 @@ menu_install() {
 
 menu_main() {
     require_root
+    F2D_NEW_VERSION=$(f2d_update_available) || F2D_NEW_VERSION=""
+    if [[ -n "$F2D_NEW_VERSION" ]]; then
+        banner
+        info "Вышла новая версия fail2detect: $F2D_VERSION → $F2D_NEW_VERSION"
+        confirm "Обновить сейчас?" y && f2d_self_update --menu
+    fi
     while true; do
         banner
         menu_item 1 "Мастер настройки защиты"
@@ -322,6 +333,7 @@ menu_main() {
         menu_item 8 "IPQuality (репутация IP)"
         menu_item 9 "Cloudflare Speedtest"
         menu_item 10 "Установка панели / ноды / подписки"
+        menu_item 11 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
         menu_item 0 "Выход"
         ask "Выбор" ""
         case "$REPLY" in
@@ -335,6 +347,7 @@ menu_main() {
             8) ipquality_run; pause;;
             9) speedtest_run; pause;;
             10) menu_install;;
+            11) menu_updates;;
             0|q) exit 0;;
         esac
     done
@@ -416,7 +429,10 @@ main() {
         speed|speedtest)
                     if [[ "${1:-}" == --tui ]]; then speedtest_tui; else speedtest_run "${1:-}"; fi;;
         config)     cmd_config "$@";;
-        update)     cmd_update;;
+        update)     if [[ "${1:-}" == --check ]]; then
+                        v=$(f2d_update_available --force) && info "Доступен fail2detect $v (сейчас $F2D_VERSION): f2d update" || ok "У вас последняя версия ($F2D_VERSION)"
+                    else cmd_update; fi;;
+        rw|remnawave) rw_cli "$@";;
         uninstall)  cmd_uninstall;;
         *)          err "Неизвестная команда: $cmd"; usage; exit 1;;
     esac

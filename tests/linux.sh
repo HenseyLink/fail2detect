@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -277,6 +277,58 @@ grep -q '"h3"' "$API_LOG" && fail "помечен хост чужой ноды" 
 : > "$API_LOG"; bal_set_tag h2 F2D_BAL del
 grep -q '{"uuid":"h2","tags":\[\]}' "$API_LOG" && pass "тег снимается" || fail "снятие тега" "$(cat "$API_LOG")"
 unset -f rw_api; source "$ROOT/lib/remnawave.sh"
+
+section "Обновления"
+for p in "0.4.0-beta 0.3.0-beta" "0.3.0 0.3.0-beta" "0.10.0 0.9.9" "2.1.10 2.1.9" "v2.2.0 2.1.9"; do
+    read -r a b <<<"$p"; version_gt "$a" "$b" && pass "$a новее $b" || fail "$a новее $b"
+done
+for p in "0.3.0-beta 0.3.0" "0.3.0 0.3.0" "0.9.9 0.10.0"; do
+    read -r a b <<<"$p"; version_gt "$a" "$b" && fail "$a не новее $b" || pass "$a не новее $b"
+done
+rm -f "$F2D_UPDATE_CACHE"; mkdir -p "$F2D_STATE_DIR"
+REMOTE_CALLS=0
+f2d_remote_version() { REMOTE_CALLS=$((REMOTE_CALLS + 1)); echo "9.9.9"; }
+v=$(f2d_update_available) && [[ "$v" == 9.9.9 ]] && pass "новая версия найдена" || fail "новая версия" "$v"
+f2d_remote_version() { echo "SHOULD-NOT-CALL"; }
+v=$(f2d_update_available) && [[ "$v" == 9.9.9 ]] && pass "повторная проверка берётся из кэша (без сети)" || fail "кэш проверки" "$v"
+f2d_remote_version() { echo "$F2D_VERSION"; }
+f2d_update_available --force >/dev/null && fail "своя версия принята за обновление" || pass "своя версия — обновления нет"
+f2d_remote_version() { echo ""; }
+rm -f "$F2D_UPDATE_CACHE"; f2d_update_available >/dev/null && fail "без сети найдено обновление" || pass "без сети меню не ругается"
+UPDATE_CHECK=no; f2d_remote_version() { echo 9.9.9; }
+rm -f "$F2D_UPDATE_CACHE"; f2d_update_available >/dev/null && fail "UPDATE_CHECK=no не отключил проверку" || pass "UPDATE_CHECK=no отключает проверку при запуске"
+UPDATE_CHECK=yes; unset -f f2d_remote_version; rm -f "$F2D_UPDATE_CACHE"
+[[ "$(compose_service_image "$ROOT/tests/fixtures/compose-caddy.yml" remnanode)" == remnawave/node:latest ]] && pass "образ ноды в compose (отступ 4)" || fail "образ ноды (caddy)"
+[[ "$(compose_service_image "$ROOT/tests/fixtures/compose-nginx.yml" remnanode)" == remnawave/node ]] && pass "образ ноды в compose (отступ 2)" || fail "образ ноды (nginx)"
+# обновление ноды: docker-заглушка, pull приносит новый образ
+RWD="$WORK/rwnode"; mkdir -p "$RWD"; printf 'services:\n  remnanode:\n    image: remnawave/node:latest\n' > "$RWD/docker-compose.yml"
+DOCKER_LOG="$WORK/docker.log"; : > "$DOCKER_LOG"; IMG="$WORK/img-id"; echo old > "$IMG"
+sync_saved=$(declare -f xray_ports_sync)
+docker() {
+    echo "$*" >> "$DOCKER_LOG"
+    case "$1 $2" in
+        "compose config") return 1;;
+        "compose pull") echo new > "$IMG";;   # pull идёт в подоболочке — состояние в файле
+        "image inspect") case "$*" in *Labels*) [[ $(<"$IMG") == old ]] && echo 2.1.0 || echo 2.2.0;; *.Id*) echo "sha256:$(<"$IMG")";; esac;;
+        "inspect -f") echo true;;
+    esac
+    return 0
+}
+xray_ports_sync() { echo sync >> "$DOCKER_LOG"; }
+out=$(rw_update_one node "$RWD" remnanode remnawave/node 2>&1)
+grep -q '2.1.0 → 2.2.0' <<<"$out" && grep -q 'compose up -d' "$DOCKER_LOG" && grep -q sync "$DOCKER_LOG" \
+    && pass "нода: pull → перезапуск → фаервол подтянул порты" || fail "обновление ноды" "$out"
+: > "$DOCKER_LOG"
+out=$(rw_update_one node "$RWD" remnanode remnawave/node 2>&1)
+grep -q 'уже последняя' <<<"$out" && ! grep -q 'compose up' "$DOCKER_LOG" && pass "без нового образа контейнер не перезапускается" || fail "лишний перезапуск" "$out"
+# закреплённая версия: предлагается переключить на последний релиз
+printf 'services:\n  remnanode:\n    image: remnawave/node:2.1.0\n' > "$RWD/docker-compose.yml"
+rw_latest_release() { echo 2.2.0; }
+rw_unpin_image "$RWD" remnanode remnawave/node:2.1.0 remnawave/node < <(echo y) >/dev/null 2>&1
+grep -q 'image: remnawave/node:2.2.0' "$RWD/docker-compose.yml" && pass "закреплённый тег 2.1.0 → 2.2.0" || fail "закреплённый тег" "$(cat "$RWD/docker-compose.yml")"
+unset -f docker rw_latest_release; eval "$sync_saved"
+# shellcheck source=/dev/null
+source "$ROOT/lib/update.sh"
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
