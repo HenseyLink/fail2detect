@@ -314,7 +314,7 @@ docker() {
     esac
     return 0
 }
-xray_ports_sync() { echo sync >> "$DOCKER_LOG"; }
+eval 'xray_ports_sync() { echo sync >> "$DOCKER_LOG"; }'   # через eval: shellcheck 0.9 иначе считает вызовы выше «до определения»
 out=$(rw_update_one node "$RWD" remnanode remnawave/node 2>&1)
 grep -q '2.1.0 → 2.2.0' <<<"$out" && grep -q 'compose up -d' "$DOCKER_LOG" && grep -q sync "$DOCKER_LOG" \
     && pass "нода: pull → перезапуск → фаервол подтянул порты" || fail "обновление ноды" "$out"
