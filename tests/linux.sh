@@ -253,13 +253,14 @@ section "Адрес API панели"
 section "Балансировщик"
 def='{"routing":{"rules":[{"type":"field","network":"tcp,udp","outboundTag":"proxy"},{"domain":["geosite:private"],"outboundTag":"direct"}]},"outbounds":[{"tag":"proxy","protocol":"vless"},{"tag":"direct","protocol":"freedom"}]}'
 t=$(balancer_template_json "$def" no)
+[[ -n "$t" ]] && pass "шаблон собирается (jq $(jq --version))" || fail "шаблон не собрался"
 [[ $(jq -c '.routing.rules' <<<"$t") == '[{"domain":["geosite:private"],"outboundTag":"direct"},{"network":"tcp,udp","balancerTag":"auto"}]' ]] \
     && pass "правила Default сохранены, «всё → proxy» заменено балансировщиком" || fail "правила шаблона" "$(jq -c '.routing.rules' <<<"$t")"
-jq -e '.outbounds | map(.tag) == ["direct"]' >/dev/null <<<"$t" && pass "тег proxy оставлен подставленным хостам" || fail "outbound proxy из Default"
+jq -e '.outbounds | map(.tag) == ["direct"]' >/dev/null <<<"${t:-null}" && pass "тег proxy оставлен подставленным хостам" || fail "outbound proxy из Default"
 jq -e '.remnawave.injectHosts == [{"selector":{"type":"tagRegex","pattern":"^F2D_BAL$"},"selectFrom":"ALL","tagPrefix":"proxy"}]
-    and .routing.balancers[0].fallbackTag == "proxy" and .routing.balancers[0].strategy.type == "leastLoad"' >/dev/null <<<"$t" \
+    and .routing.balancers[0].fallbackTag == "proxy" and .routing.balancers[0].strategy.type == "leastLoad"' >/dev/null <<<"${t:-null}" \
     && pass "без мостов: пул по тегу F2D_BAL, fallback — proxy" || fail "шаблон без мостов"
-t=$(balancer_template_json "" yes)
+t=$(balancer_template_json "" yes); [[ -n "$t" ]] || t=null
 jq -e '(.remnawave.injectHosts | map(.tagPrefix)) == ["proxy","wl"] and .burstObservatory.subjectSelector == ["proxy","wl"]
     and .routing.balancers[0].selector == ["proxy"] and .routing.balancers[0].fallbackTag == "wl"' >/dev/null <<<"$t" \
     && pass "белые списки: мосты пингуются, но трафик на них — только когда пул молчит" || fail "шаблон с мостами"

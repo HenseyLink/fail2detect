@@ -29,9 +29,9 @@ BAL_NOT_JSON='["XRAY_BASE64","MIHOMO","STASH","CLASH","SINGBOX"]'
 # правила маршрутизации сохраняются; голое правило «всё → прокси» заменяется
 # правилом «всё → балансировщик».
 balancer_template_json() {   # default_json has_wl(yes|no)
-    local def="${1:-}"; [[ -n "$def" ]] || def='{}'
-    jq -n --argjson def "$def" --arg wl "${2:-no}" --arg bal "$BAL_TAG" --arg wltag "$BAL_WL_TAG" --arg probe "$BAL_PROBE_URL" '
-        ($def | {
+    local base="${1:-}"; [[ -n "$base" ]] || base='{}'
+    jq -n --argjson base "$base" --arg wl "${2:-no}" --arg bal "$BAL_TAG" --arg wltag "$BAL_WL_TAG" --arg probe "$BAL_PROBE_URL" '
+        ($base | {
             dns: (.dns // {servers: ["1.1.1.1", "8.8.8.8"], queryStrategy: "UseIP"}),
             inbounds: (.inbounds // [
                 {tag: "socks", port: 10808, listen: "127.0.0.1", protocol: "socks",
