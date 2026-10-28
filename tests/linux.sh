@@ -276,6 +276,31 @@ grep -q '"h2"' "$API_LOG" && fail "повторно помечен уже пом
 grep -q '"h3"' "$API_LOG" && fail "помечен хост чужой ноды" || pass "хосты других нод не трогаются"
 : > "$API_LOG"; bal_set_tag h2 F2D_BAL del
 grep -q '{"uuid":"h2","tags":\[\]}' "$API_LOG" && pass "тег снимается" || fail "снятие тега" "$(cat "$API_LOG")"
+# весь сценарий setup: у хостов нет тегов/шаблона — пустые поля не должны сдвигать uuid inbound'а
+P1=11111111-1111-4111-8111-111111111111; I1=22222222-2222-4222-8222-222222222222
+HOSTS=$(jq -nc --arg p "$P1" --arg i "$I1" '{response: [
+  {uuid:"h1", remark:"de1 · TCP Reality", address:"1.1.1.1", port:443, tags:[], isHidden:false, xrayJsonTemplateUuid:null, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}},
+  {uuid:"h2", remark:"fi1 · TCP Reality", address:"2.2.2.2", port:443, tags:[], isHidden:false, xrayJsonTemplateUuid:null, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}},
+  {uuid:"h3", remark:"ru-wl · TCP Reality", address:"3.3.3.3", port:8443, tags:[], isHidden:false, xrayJsonTemplateUuid:null, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}}]}')
+rw_api() {
+    echo "$1 $2 ${3:-}" >> "$API_LOG"
+    case "$1 $2" in
+        "GET /api/hosts") echo "$HOSTS";;
+        "GET /api/subscription-templates") echo '{"response":{"templates":[{"uuid":"d0","name":"Default","templateType":"XRAY_JSON"}]}}';;
+        "GET /api/subscription-templates/d0") echo '{"response":{"templateJson":{}}}';;
+        *) echo '{"response":{"uuid":"33333333-3333-4333-8333-333333333333"}}';;
+    esac
+}
+req_saved=$(declare -f require_root rw_need_api); require_root() { :; }; rw_need_api() { :; }
+: > "$API_LOG"
+balancer_setup < <(printf '1 2\n3\n⚡ Авто\n') >/dev/null 2>&1; rc=$?
+body=$(grep '^POST /api/hosts ' "$API_LOG" | cut -d' ' -f3-)
+[[ $rc == 0 ]] && jq -e --arg p "$P1" --arg i "$I1" '.inbound == {configProfileUuid:$p, configProfileInboundUuid:$i} and .address == "1.1.1.1" and .port == 443
+    and .remark == "⚡ Авто" and .xrayJsonTemplateUuid != null and (.excludeFromSubscriptionTypes | index("XRAY_JSON") | not)' >/dev/null <<<"$body" \
+    && pass "setup: запись «Авто» создаётся с inbound'ом первой ноды" || fail "setup: запись «Авто»" "rc=$rc body=$body"
+grep -q '"uuid":"h3","tags":\["F2D_WL"\]' "$API_LOG" && grep -q '"uuid":"h1","tags":\["F2D_BAL"\]' "$API_LOG" \
+    && pass "setup: пул и мост помечены тегами" || fail "setup: теги"
+unset -f require_root rw_need_api; eval "$req_saved"
 unset -f rw_api; source "$ROOT/lib/remnawave.sh"
 
 section "Обновления"

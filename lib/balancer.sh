@@ -74,10 +74,12 @@ balancer_template_json() {   # default_json has_wl(yes|no)
 
 # ---------- хосты ----------
 # uuid remark address port tags(через запятую) hidden template_uuid profile inbound
+# Разделитель — \037, не табуляция: read с IFS=$'\t' склеивает пустые поля
+# (нет тегов, не скрыт, без шаблона), и uuid профиля съезжал.
 bal_hosts() {
     rw_api GET /api/hosts | jq -r '.response[] | [.uuid, .remark, (.address // ""), ((.port // 0) | tostring),
         ((.tags // []) | join(",")), (if .isHidden then "hidden" else "" end), (.xrayJsonTemplateUuid // ""),
-        (.inbound.configProfileUuid // ""), (.inbound.configProfileInboundUuid // "")] | @tsv'
+        (.inbound.configProfileUuid // ""), (.inbound.configProfileInboundUuid // "")] | join("\u001f")'
 }
 
 bal_set_tag() {   # host_uuid tag add|del
@@ -123,7 +125,7 @@ balancer_status() {
     title "Балансировщик (подписка Xray JSON)"
     local tpl; tpl=$(bal_template_uuid)
     local u rem addr port tags hid tu _p _i n=0 w=0 wrap=""
-    while IFS=$'\t' read -r u rem addr port tags hid tu _p _i; do
+    while IFS=$'\037' read -r u rem addr port tags hid tu _p _i; do
         [[ -n "$tu" && "$tu" == "$tpl" ]] && { wrap="$rem"; continue; }
         if [[ ",$tags," == *",$BAL_TAG,"* ]]; then n=$((n + 1)); printf '  %s●%s %-30s %s:%s\n' "$C_GREEN" "$C_RESET" "$rem" "$addr" "$port"; fi
         if [[ ",$tags," == *",$BAL_WL_TAG,"* ]]; then w=$((w + 1)); printf '  %s◆%s %-30s %s:%s  %s(белые списки)%s\n' "$C_YELLOW" "$C_RESET" "$rem" "$addr" "$port" "$C_GRAY" "$C_RESET"; fi
@@ -141,7 +143,7 @@ balancer_status() {
 # выбрать хосты номерами; печатает uuid'ы
 _bal_pick() {   # "вопрос" "по умолчанию" файл_со_списком
     local list="$3" i=0 u rem addr port tags hid tu _p _i
-    while IFS=$'\t' read -r u rem addr port tags hid tu _p _i; do
+    while IFS=$'\037' read -r u rem addr port tags hid tu _p _i; do
         i=$((i + 1))
         printf '  %s%2d.%s %-30s %s:%s %s%s%s\n' "$C_YELLOW" "$i" "$C_RESET" "${rem:0:30}" "$addr" "$port" "$C_GRAY" \
             "$( [[ ",$tags," == *",$BAL_TAG,"* ]] && echo "[в пуле]")$( [[ ",$tags," == *",$BAL_WL_TAG,"* ]] && echo "[белые списки]")$( [[ -n "$hid" ]] && echo "[скрыт]")" "$C_RESET" >&2
@@ -149,9 +151,9 @@ _bal_pick() {   # "вопрос" "по умолчанию" файл_со_спи�
     ask "$1" "$2"
     local n out=()
     for n in ${REPLY//,/ }; do
-        [[ "$n" == all || "$n" == все ]] && { cut -f1 "$list"; return; }
+        [[ "$n" == all || "$n" == все ]] && { cut -d$'\037' -f1 "$list"; return; }
         [[ "$n" == "-" || "$n" == нет ]] && return 0
-        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= i )) && out+=("$(sed -n "${n}p" "$list" | cut -f1)")
+        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= i )) && out+=("$(sed -n "${n}p" "$list" | cut -d$'\037' -f1)")
     done
     ((${#out[@]})) && printf '%s\n' "${out[@]}"
 }
@@ -166,7 +168,7 @@ balancer_setup() {
     local tpl; tpl=$(bal_template_uuid)
     local list; list=$(mktemp)
     # кандидаты: все хосты, кроме самой обёртки балансировщика
-    bal_hosts | awk -F'\t' -v t="$tpl" '!(t != "" && $7 == t)' > "$list"
+    bal_hosts | awk -F$'\037' -v t="$tpl" '!(t != "" && $7 == t)' > "$list"
     [[ -s "$list" ]] || { rm -f "$list"; err "В панели нет хостов"; return 1; }
 
     echo "  ${C_BOLD}1. Ноды пула${C_RESET} (номера через пробел, «all» — все):"
@@ -179,7 +181,7 @@ balancer_setup() {
 
     # теги: в пул — F2D_BAL, мосты — F2D_WL (и не в пуле, чтобы не тянуть трафик в обычное время)
     local u rem addr port tags hid tu _p _i
-    while IFS=$'\t' read -r u rem addr port tags hid tu _p _i; do
+    while IFS=$'\037' read -r u rem addr port tags hid tu _p _i; do
         if grep -qx "$u" <<<"$wl"; then
             bal_set_tag "$u" "$BAL_WL_TAG" add; bal_set_tag "$u" "$BAL_TAG" del
         elif grep -qx "$u" <<<"$pool"; then
@@ -197,12 +199,15 @@ balancer_setup() {
     # обёртка — видимая только в подписке Xray JSON запись; inbound — как у
     # первой ноды пула, чтобы её видели пользователи этой ноды
     local first; first=$(head -1 <<<"$pool")
-    local wrap; wrap=$(awk -F'\t' -v t="$tpl" '$7 == t {print $1; exit}' <(bal_hosts))
-    local f; f=$(awk -F'\t' -v u="$first" '$1 == u' "$list")
-    IFS=$'\t' read -r u rem addr port tags hid tu _p _i <<<"$f"
+    local wrap; wrap=$(awk -F$'\037' -v t="$tpl" '$7 == t {print $1; exit}' <(bal_hosts))
+    local f; f=$(awk -F$'\037' -v u="$first" '$1 == u' "$list")
+    IFS=$'\037' read -r u rem addr port tags hid tu _p _i <<<"$f"
+    if [[ -z "$_p" || -z "$_i" ]]; then
+        rm -f "$list"; err "У хоста «${rem}» нет inbound'а в профиле — выберите первым в пуле рабочий хост"; return 1
+    fi
     ask "Название записи в подписке" "⚡ Авто (лучшая нода)"; local remark="$REPLY"
     local body r
-    body=$(jq -n --arg rem "$remark" --arg a "$addr" --argjson p "${port:-443}" --arg t "$tpl" --arg pu "$_p" --arg iu "$_i" --argjson ex "$BAL_NOT_JSON" \
+    body=$(jq -nc --arg rem "$remark" --arg a "$addr" --argjson p "${port:-443}" --arg t "$tpl" --arg pu "$_p" --arg iu "$_i" --argjson ex "$BAL_NOT_JSON" \
         '{remark: $rem, address: $a, port: $p, xrayJsonTemplateUuid: $t, excludeFromSubscriptionTypes: $ex,
           isDisabled: false, isHidden: false, tags: ["F2D_AUTO"], inbound: {configProfileUuid: $pu, configProfileInboundUuid: $iu}}')
     if [[ -n "$wrap" ]]; then
@@ -211,7 +216,7 @@ balancer_setup() {
         r=$(rw_api POST /api/hosts "$body")
     fi
     rm -f "$list"
-    jq -e '.response.uuid' >/dev/null <<<"$r" || { err "Запись «${remark}» не создана: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
+    jq -e '.response.uuid' >/dev/null <<<"$r" || { err "Запись «${remark}» не создана: $(jq -c '[.message, .errors] | map(select(. != null))' <<<"$r" 2>/dev/null)"; return 1; }
     config_set BALANCER_HOST_UUID "$(jq -r '.response.uuid' <<<"$r")"
     ok "Запись «${remark}» — в подписке Xray JSON"
     audit_write BALANCER - - - "настроен: пул $(wc -l <<<"$pool" | tr -d ' '), мостов $([[ -n "$wl" ]] && wc -l <<<"$wl" | tr -d ' ' || echo 0)"
@@ -228,7 +233,7 @@ balancer_add() {   # [wl]
     local tpl; tpl=$(bal_template_uuid)
     [[ -n "$tpl" ]] || { warn "Балансировщик ещё не настроен"; balancer_setup; return; }
     local list; list=$(mktemp)
-    bal_hosts | awk -F'\t' -v t="$tpl" '$7 != t' > "$list"
+    bal_hosts | awk -F$'\037' -v t="$tpl" '$7 != t' > "$list"
     local sel u; sel=$(_bal_pick "Добавить в $what" "" "$list"); rm -f "$list"
     for u in $sel; do bal_set_tag "$u" "$tag" add && ok "Хост $u → $what"; done
     # первый мост — нужно пересобрать шаблон (появляется fallback на «wl»)
@@ -238,7 +243,7 @@ balancer_add() {   # [wl]
 # пометить хосты этой ноды тегом пула (из install node)
 balancer_tag_node_hosts() {   # node_name
     local u rem
-    while IFS=$'\t' read -r u rem _; do
+    while IFS=$'\037' read -r u rem _; do
         [[ "$rem" == "$1 · "* ]] && bal_set_tag "$u" "$BAL_TAG" add && ok "«${rem}» → в балансировщике"
     done < <(bal_hosts)
 }
@@ -261,7 +266,7 @@ balancer_remove() {
     confirm "Убрать балансировщик (запись «Авто», шаблон и теги)? Ноды и хосты останутся" n || return 1
     local tpl; tpl=$(bal_template_uuid)
     local u rem addr port tags hid tu _p _i
-    while IFS=$'\t' read -r u rem addr port tags hid tu _p _i; do
+    while IFS=$'\037' read -r u rem addr port tags hid tu _p _i; do
         if [[ -n "$tpl" && "$tu" == "$tpl" ]]; then rw_api DELETE "/api/hosts/$u" >/dev/null && ok "Запись «${rem}» удалена"; continue; fi
         [[ ",$tags," == *",$BAL_TAG,"* ]] && bal_set_tag "$u" "$BAL_TAG" del
         [[ ",$tags," == *",$BAL_WL_TAG,"* ]] && bal_set_tag "$u" "$BAL_WL_TAG" del

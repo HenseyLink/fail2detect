@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.4.0-beta"
+F2D_VERSION="0.4.1-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
