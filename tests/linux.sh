@@ -288,6 +288,9 @@ rw_api() {
         "GET /api/hosts") echo "$HOSTS";;
         "GET /api/subscription-templates") echo '{"response":{"templates":[{"uuid":"d0","name":"Default","templateType":"XRAY_JSON"}]}}';;
         "GET /api/subscription-templates/d0") echo '{"response":{"templateJson":{}}}';;
+        "GET /api/subscription-settings") echo '{"response":{"uuid":"s1","serveJsonAtBaseSubscription":false}}';;
+        "PATCH /api/subscription-settings") jq -c '{response: {uuid: .uuid, serveJsonAtBaseSubscription: .serveJsonAtBaseSubscription}}' <<<"$3";;
+        "GET /api/external-squads") echo '{"response":{"externalSquads":[{"name":"partners","subscriptionSettings":{"serveJsonAtBaseSubscription":false}}]}}';;
         *) echo '{"response":{"uuid":"33333333-3333-4333-8333-333333333333"}}';;
     esac
 }
@@ -300,6 +303,10 @@ body=$(grep '^POST /api/hosts ' "$API_LOG" | cut -d' ' -f3-)
     && pass "setup: запись «Авто» создаётся с inbound'ом первой ноды" || fail "setup: запись «Авто»" "rc=$rc body=$body"
 grep -q '"uuid":"h3","tags":\["F2D_WL"\]' "$API_LOG" && grep -q '"uuid":"h1","tags":\["F2D_BAL"\]' "$API_LOG" \
     && pass "setup: пул и мост помечены тегами" || fail "setup: теги"
+grep -q 'PATCH /api/subscription-settings {"uuid":"s1","serveJsonAtBaseSubscription":true}' "$API_LOG" \
+    && pass "setup: включён JSON на базовом пути подписки (Happ/INCY увидят «Авто»)" || fail "setup: serveJsonAtBaseSubscription"
+grep -q '^BALANCER_JSON_BASE_SET="yes"' "$F2D_CONF" && pass "setup: запомнено, что настройку включил fail2detect" || fail "setup: BALANCER_JSON_BASE_SET"
+out=$(bal_json_base_enable 2>&1 </dev/null); grep -q partners <<<"$out" && pass "предупреждение про внешний squad с выключенным JSON" || fail "внешний squad" "$out"
 unset -f require_root rw_need_api; eval "$req_saved"
 unset -f rw_api; source "$ROOT/lib/remnawave.sh"
 

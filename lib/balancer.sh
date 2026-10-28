@@ -119,6 +119,39 @@ bal_write_template() {   # has_wl
     echo "$uuid"
 }
 
+# ---------- JSON на базовом пути подписки ----------
+# Happ, INCY, v2rayNG, Streisand… по обычной ссылке подписки получают base64,
+# а запись «Авто» из base64 исключена. Панель отдаёт им Xray JSON только при
+# включённой настройке «Отдавать JSON на базовом пути подписки».
+bal_json_base() {   # печатает true|false (пусто — не узнать)
+    rw_api GET /api/subscription-settings | jq -r '.response.serveJsonAtBaseSubscription | if . == null then empty else tostring end' 2>/dev/null   # «// empty» съел бы false
+}
+
+bal_json_base_set() {   # true|false
+    local u r
+    u=$(rw_api GET /api/subscription-settings | jq -r '.response.uuid // empty' 2>/dev/null)
+    [[ -n "$u" ]] || return 1
+    r=$(rw_api PATCH /api/subscription-settings "$(jq -nc --arg u "$u" --argjson v "$1" '{uuid: $u, serveJsonAtBaseSubscription: $v}')")
+    [[ "$(jq -r '.response.serveJsonAtBaseSubscription | tostring' <<<"$r" 2>/dev/null)" == "$1" ]]
+}
+
+bal_json_base_enable() {
+    local cur; cur=$(bal_json_base)
+    if [[ "$cur" == true ]]; then ok "Панель отдаёт Xray JSON по обычной ссылке подписки"; return 0; fi
+    if bal_json_base_set true; then
+        # запомнить, что включили мы — remove вернёт как было
+        [[ "$cur" == false ]] && config_set BALANCER_JSON_BASE_SET yes
+        ok "Включено «Отдавать JSON на базовом пути подписки» — Happ, INCY, v2rayNG получат запись «Авто»"
+    else
+        warn "Не удалось включить настройку через API. Включите вручную:"
+        warn "  Панель → Подписка → Настройки → «Отдавать JSON на базовом пути подписки»"
+    fi
+    # внешние squad'ы могут переопределять эту настройку для своих пользователей
+    local ext; ext=$(rw_api GET /api/external-squads 2>/dev/null | jq -r '.response.externalSquads[]? | select(.subscriptionSettings.serveJsonAtBaseSubscription == false) | .name' 2>/dev/null)
+    [[ -n "$ext" ]] && warn "У внешних squad'ов это выключено отдельно (их пользователи «Авто» не увидят): $(paste -sd, - <<<"$ext")"
+    return 0
+}
+
 # ---------- команды ----------
 balancer_status() {
     rw_need_api || return 1
@@ -133,6 +166,10 @@ balancer_status() {
     echo
     if [[ -n "$tpl" && -n "$wrap" ]]; then
         ok "Работает: запись «${wrap}», нод в пуле — $n, мостов для белых списков — $w"
+        if [[ "$(bal_json_base)" == false ]]; then
+            warn "Выключено «Отдавать JSON на базовом пути подписки»: Happ, INCY, v2rayNG не увидят «${wrap}»"
+            [[ -t 0 && $EUID -eq 0 ]] && confirm "Включить?" y && bal_json_base_enable
+        fi
     elif [[ -n "$tpl" ]]; then
         warn "Шаблон есть, но записи в подписке нет — запустите: f2d balancer setup"
     else
@@ -162,8 +199,9 @@ balancer_setup() {
     require_root; rw_need_api || return 1
     title "Клиентский балансировщик"
     echo "  В подписке появится запись «⚡ Авто»: клиент сам пингует ноды пула и"
-    echo "  держит трафик на лучших. Работает в клиентах с подпиской Xray JSON"
-    echo "  (v2rayNG, Happ, Streisand…); остальным эта запись не показывается."
+    echo "  держит трафик на лучших. Отдельный сервер не нужен — это виртуальная"
+    echo "  запись, соединения идут прямо на ноды пула. Работает в клиентах с"
+    echo "  подпиской Xray JSON (Happ, INCY, v2rayNG, Streisand…)."
     echo
     local tpl; tpl=$(bal_template_uuid)
     local list; list=$(mktemp)
@@ -219,6 +257,7 @@ balancer_setup() {
     jq -e '.response.uuid' >/dev/null <<<"$r" || { err "Запись «${remark}» не создана: $(jq -c '[.message, .errors] | map(select(. != null))' <<<"$r" 2>/dev/null)"; return 1; }
     config_set BALANCER_HOST_UUID "$(jq -r '.response.uuid' <<<"$r")"
     ok "Запись «${remark}» — в подписке Xray JSON"
+    bal_json_base_enable
     audit_write BALANCER - - - "настроен: пул $(wc -l <<<"$pool" | tr -d ' '), мостов $([[ -n "$wl" ]] && wc -l <<<"$wl" | tr -d ' ' || echo 0)"
     echo
     info "Клиентам нужно обновить подписку. Новые ноды: f2d balancer add (или тег $BAL_TAG в панели)."
@@ -272,6 +311,10 @@ balancer_remove() {
         [[ ",$tags," == *",$BAL_WL_TAG,"* ]] && bal_set_tag "$u" "$BAL_WL_TAG" del
     done < <(bal_hosts)
     [[ -n "$tpl" ]] && rw_api DELETE "/api/subscription-templates/$tpl" >/dev/null && ok "Шаблон удалён"
+    if [[ "${BALANCER_JSON_BASE_SET:-}" == yes ]]; then
+        bal_json_base_set false && ok "«Отдавать JSON на базовом пути подписки» выключено, как было до балансировщика"
+        config_set BALANCER_JSON_BASE_SET ""
+    fi
     config_set BALANCER_TEMPLATE_UUID ""; config_set BALANCER_HOST_UUID ""
     audit_write BALANCER - - - "удалён"
 }
