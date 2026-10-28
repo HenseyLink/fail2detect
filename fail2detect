@@ -90,8 +90,10 @@ ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
 ${C_BOLD}Сеть${C_RESET}
   geo [--full]              GeoCheck: в какой стране IP видят сервисы, CDN и гео-базы (IPv4/IPv6)
   ipquality [ip]            IPQuality: тип IP, VPN/прокси-флаги, риск, сервисы, почта
-  speed [--quick]           Cloudflare Speedtest
-  speed --tui               TUI cloudflare-speed-cli
+  speed [--quick]           Cloudflare Speedtest: живой дашборд (скорость, задержка
+                            в простое и под нагрузкой, потери UDP, Bufferbloat, стабильность)
+  speed --plain | --json    без дашборда: итог текстом / JSON
+  speed history             история замеров
 
 ${C_BOLD}Прочее${C_RESET}
   config <KEY> [VALUE]      показать/изменить параметр
@@ -427,7 +429,7 @@ main() {
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;
         speed|speedtest)
-                    if [[ "${1:-}" == --tui ]]; then speedtest_tui; else speedtest_run "${1:-}"; fi;;
+                    speedtest_cli "$@";;
         config)     cmd_config "$@";;
         update)     if [[ "${1:-}" == --check ]]; then
                         v=$(f2d_update_available --force) && info "Доступен fail2detect $v (сейчас $F2D_VERSION): f2d update" || ok "У вас последняя версия ($F2D_VERSION)"

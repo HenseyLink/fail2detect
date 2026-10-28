@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -361,6 +361,58 @@ grep -q 'image: remnawave/node:2.2.0' "$RWD/docker-compose.yml" && pass "зак�
 unset -f docker rw_latest_release; eval "$sync_saved"
 # shellcheck source=/dev/null
 source "$ROOT/lib/update.sh"
+
+section "Speedtest"
+st=$(printf '%s\n' 10 20 30 40 50 | st_stats)
+[[ "$st" == "5 30.00 30.00 20.00 40.00 48.00 10.00 50.00 15.81" ]] && pass "перцентили с интерполяцией, джиттер = ст. отклонение" || fail "st_stats" "$st"
+[[ "$(printf '%s\n' 7 | st_stats)" == "1 7.00 7.00 7.00 7.00 7.00 7.00 7.00 0.00" ]] && pass "одно значение" || fail "st_stats n=1"
+[[ -z "$(st_stats < /dev/null)" ]] && pass "пустая выборка — пусто" || fail "st_stats пусто"
+[[ "$(printf '%s\n' 90 100 110 | st_cv)" == 10.0 ]] && pass "коэффициент вариации" || fail "st_cv"
+[[ -z "$(printf '%s\n' 100 100 | st_cv)" ]] && pass "CV не считается по 2 значениям" || fail "st_cv n=2"
+m=$(st_mos 20 2 0); awk -v m="$m" 'BEGIN{exit !(m >= 4.0)}' && pass "MOS: 20 мс без потерь ≥ 4 ($m)" || fail "MOS хороший" "$m"
+m1=$(st_mos 30 5 0); m2=$(st_mos 30 5 10); awk -v a="$m1" -v b="$m2" 'BEGIN{exit !(b < a)}' && pass "MOS падает с потерями ($m1 → $m2)" || fail "MOS потери"
+for p in "0 A+" "5 A+" "29 A" "60 B" "150 C" "399 D" "800 F" "-3 A+"; do
+    read -r v g <<<"$p"; [[ "$(st_bloat_grade "$v")" == "$g" ]] || { fail "bufferbloat $v → $g" "$(st_bloat_grade "$v")"; continue; }
+done; pass "оценки Bufferbloat по порогам"
+for p in "3 A" "10 B" "15 C" "30 D" "40 F"; do read -r v g <<<"$p"; [[ "$(st_stab_grade "$v")" == "$g" ]] || fail "стабильность $v → $g"; done; pass "оценки стабильности по порогам"
+[[ "$(st_loss_label 0)" == Отлично && "$(st_loss_label 2.0)" == Приемлемо && "$(st_loss_label 7)" == "Очень плохо" ]] && pass "метки потерь" || fail "метки потерь"
+# окна скорости: 1 МБ за [0.5; 1.0] → в окнах 2 и 3 по 0.5 МБ = 16 Мбит/с
+printf '100.5 101.0 1000000\n' > "$WORK/ev"
+[[ "$(st_series "$WORK/ev" 100 2 102 | tr '\n' ' ')" == "0.00 0.00 16.00 16.00 0.00 0.00 0.00 0.00 " ]] && pass "байты передачи раскладываются по окнам 250 мс" || fail "st_series" "$(st_series "$WORK/ev" 100 2 102 | tr '\n' ' ')"
+[[ "$(st_series "$WORK/ev" 100 10 101 | wc -l | tr -d ' ')" == 4 ]] && pass "во время фазы — только прошедшие окна" || fail "st_series текущие окна"
+[[ "$(seq 1 40 | st_steady 10 | head -1)" == 9 ]] && pass "разгон: первые 20% фазы (2 с = 8 окон) отброшены" || fail "st_steady" "$(seq 1 40 | st_steady 10 | head -1)"
+[[ "$(seq 1 20 | st_steady 4 | head -1)" == 5 ]] && pass "разгон не короче 1 с" || fail "st_steady 1 с"
+widths_ok() { local l; while IFS= read -r l; do [[ ${#l} == "$1" ]] || return 1; done; }   # ширина в символах
+max_width() { local l m=0; while IFS= read -r l; do ((${#l} > m)) && m=${#l}; done; echo "$m"; }
+# рисование: строки ровно нужной ширины, UTF-8 не режется (mawk/BSD awk)
+out=$(printf '%s\n' 10 50 100 30 | st_chart 20 5 100 "" | sed 's/\x1b\[[0-9;]*m//g')
+(( $(wc -l <<<"$out") == 5 )) && ! grep -q $'\xef\xbf\xbd' <<<"$out" && widths_ok 20 <<<"$out" \
+    && pass "график: 5 строк по 20 символов" || fail "st_chart" "$out"
+grep -q '█' <<<"$out" && pass "график рисует блоки" || fail "st_chart блоки"
+out=$(st_strip 30 10 20 25 30 40 "0 50" "" | sed 's/\x1b\[[0-9;]*m//g')
+[[ ${#out} == 30 && "$out" == *├*▓*┃*▓*┤* ]] && pass "полоса задержки: ├─▓┃▓─┤ шириной 30" || fail "st_strip" "$out"
+box=$(_st_box 30 "" "Заголовок" "строка" | sed 's/\x1b\[[0-9;]*m//g')
+widths_ok 30 <<<"$box" && pass "рамка ровно 30 символов" || fail "_st_box" "$box"
+# итог из сохранённых замеров
+ST_T="$WORK/st"; mkdir -p "$ST_T"
+printf '%s\n' 20 21 22 20 23 > "$ST_T/idle.lat"; printf '%s\n' 40 42 45 41 > "$ST_T/down.lat"; printf '%s\n' 30 31 29 > "$ST_T/up.lat"
+echo 1000 > "$ST_T/down.t0"; echo 2000 > "$ST_T/up.t0"
+: > "$ST_T/down.ev"; : > "$ST_T/up.ev"
+for i in $(seq 0 39); do awk -v i="$i" 'BEGIN{printf "%.2f %.2f 3125000\n", 1000 + i * 0.25, 1000 + (i + 1) * 0.25}' >> "$ST_T/down.ev"
+    awk -v i="$i" 'BEGIN{printf "%.2f %.2f 1562500\n", 2000 + i * 0.25, 2000 + (i + 1) * 0.25}' >> "$ST_T/up.ev"; done
+{ for i in $(seq 1 49); do echo "ok 15"; done; echo lost; } > "$ST_T/udp"
+echo '{"ip":"203.0.113.5","asn":64500,"org":"Test","colo":"FRA","colo_city":"Frankfurt"}' > "$ST_T/meta.json"
+printf 'family=IPv4\niface=eth0\ndns=1.2\ntls_ms=30\ntls=TLSv1.3\n' > "$ST_T/net"
+r=$(EPOCHREALTIME=3000.0 st_result_json 10 10)
+jq -e '.download.med == 100 and .upload.med == 50 and .idle_latency.med == 21 and .bufferbloat_ms == 20.5
+    and .udp.loss == 2 and .udp.recv == 49 and .udp.label == "Приемлемо" and .cv_worst == 0 and .net.iface == "eth0"' >/dev/null <<<"$r" \
+    && pass "итог: 100/50 Мбит/с, bufferbloat +20.5 мс, потери 2%" || fail "st_result_json" "$r"
+echo "$r" > "$ST_T/result.json"
+out=$(COLUMNS=120 st_render 10 10 yes | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'Bufferbloat   A ' <<<"$out" && grep -q 'Приемлемо' <<<"$out" && pass "итоговый экран: оценки и потери" || fail "st_render" "$out"
+(( $(tail -n +3 <<<"$out" | max_width) <= 120 )) && pass "итоговый экран не шире 120 колонок" || fail "ширина экрана" "$(tail -n +3 <<<"$out" | max_width)"
+out=$(COLUMNS=80 st_render 10 10 yes | sed 's/\x1b\[[0-9;]*m//g')
+(( $(tail -n +3 <<<"$out" | max_width) <= 80 )) && pass "узкий терминал (80): панели друг под другом" || fail "ширина 80" "$(tail -n +3 <<<"$out" | max_width)"
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

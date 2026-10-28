@@ -1,6 +1,6 @@
 # fail2detect
 
-**Версия 0.4.2-beta.** Проект в бета-версии: проверяйте на тестовом сервере, прежде чем ставить на рабочие ноды.
+**Версия 0.5.0-beta.** Проект в бета-версии: проверяйте на тестовом сервере, прежде чем ставить на рабочие ноды.
 
 Защита нод и панели [Remnawave](https://github.com/remnawave) от сканеров РКН, активного зондирования и брутфорса.
 
@@ -191,8 +191,11 @@ fail2detect geo               # GeoCheck: в какой стране IP видя
 fail2detect geo --full        # то же без маскировки IP (по умолчанию 78.135.*.*)
 fail2detect ipquality         # IPQuality: репутация IP этого сервера
 fail2detect ipquality 1.2.3.4 # IPQuality по другому IP (разделы 1–4)
-fail2detect speed             # задержка, джиттер, скачивание/загрузка через speed.cloudflare.com
-fail2detect speed --tui       # полноэкранная проверка, ставится по запросу
+fail2detect speed             # живой дашборд: скорость, задержка в простое и под нагрузкой, потери UDP
+fail2detect speed --quick     # то же, фазы по 5 с
+fail2detect speed --plain     # без дашборда, только итог (для ssh без цвета, логов)
+fail2detect speed --json      # итог в JSON
+fail2detect speed history     # последние 20 замеров
 ```
 
 **GeoCheck** спрашивает у самих сервисов, в какой стране они видят этот IP, отдельно по IPv4 и IPv6. Каждый сервис пользуется своей базой, поэтому ответы расходятся, и ради этого отчёт и нужен. Проверяются три группы:
@@ -211,6 +214,18 @@ fail2detect speed --tui       # полноэкранная проверка, с�
 6. **Почта:** исходящий порт 25, подключение к почтовым сервисам, около 20 чёрных списков (DNSBL).
 
 Для ноды VPN самые важные разделы 2–4: по ним сервисы отличают VPN-сервер от обычного абонента.
+
+**Cloudflare Speedtest** меряет канал через speed.cloudflare.com. Методика как у [cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli), код свой, на bash, ставить ничего не нужно. Порядок замера:
+1. 2 с задержки в простое.
+2. Скачивание и отдача по 10 с, по 6 потоков с keep-alive. Параллельно меряется задержка под нагрузкой.
+3. 50 STUN-пакетов на `stun.cloudflare.com:3478`: потери, RTT, джиттер и MOS.
+
+Как считается итог:
+- Скорость считается по окнам 250 мс. Первые 20% фазы, но не меньше 1 с, уходят на разгон TCP и в итог не попадают.
+- Bufferbloat — насколько медиана задержки под нагрузкой выросла по сравнению с простоем. Оценки: A+ ≤ 5 мс, A ≤ 30, B ≤ 60, C ≤ 200, D ≤ 400, F — больше.
+- Стабильность — разброс скорости (коэффициент вариации). Оценки: A ≤ 5%, B ≤ 10, C ≤ 20, D ≤ 35, F — больше.
+
+Замеры сохраняются в `/var/lib/fail2detect/speedtest`, хранятся последние 100.
 
 ### 7. Аудит безопасности
 
@@ -283,7 +298,7 @@ Remnawave обновляется независимо от версии fail2det
 - [Remnawave](https://github.com/remnawave) — официальные compose-файлы для установки
 - [vernette/ipregion](https://github.com/vernette/ipregion) — способы определения регионов для GeoCheck
 - [xykt/IPQuality](https://github.com/xykt/IPQuality) — структура отчёта IPQuality
-- [kavehtehrani/cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli) — вдохновение для speedtest
+- [kavehtehrani/cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli) — методика speedtest (код свой)
 
 ## Тесты
 
