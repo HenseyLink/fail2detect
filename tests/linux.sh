@@ -664,6 +664,49 @@ printf 'services:\n  nginx:\n    image: nginx\n' > "$DT/opt/remnawave/docker-com
 [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "чужой compose в каталоге — не панель" || fail "чужой compose" "$(det)"
 unset CT
 
+section "Порт API ноды"
+NP="$WORK/nodeport"; mkdir -p "$NP/panel" "$NP/node"
+cat > "$NP/panel/docker-compose.yml" <<'YML'
+services:
+  remnawave:
+    image: remnawave/backend:2
+    ports:
+      - '127.0.0.1:3000:${APP_PORT:-3000}'
+  remnawave-subscription-page:
+    image: remnawave/subscription-page:latest
+    environment:
+      - APP_PORT=3010
+  remnanode:
+    image: remnawave/node:latest
+    network_mode: host
+    environment:
+      - NODE_PORT=2222
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+YML
+echo 'APP_PORT=3000' > "$NP/panel/.env"
+nport() {   # настоящая detect_node_api_port; docker — заглушка с контейнерами из $CT
+    ( source "$ROOT/lib/detect.sh"
+      docker() { case "$1" in ps) printf '%b' "${CT:-}";; inspect) printf '%b' "${CT_ENV:-}";; esac; }
+      _RW_CT_DONE=""; NODE_API_PORT=""; RW_PANEL_DIR="$NP/panel"; RW_NODE_DIR="$NP/node"
+      detect_node_api_port )
+}
+[[ "$(nport)" == 2222 ]] && pass "панель «всё в одном» (eGames): 2222, а не APP_PORT=3010 подписки" || fail "порт ноды eGames" "$(nport)"
+CT="remnanode\tremnawave/node:latest\t$NP/panel\trunning\n" CT_ENV="PATH=/bin\nNODE_PORT=4321\n"
+[[ "$(CT="$CT" CT_ENV="$CT_ENV" nport)" == 4321 ]] && pass "порт из окружения работающего контейнера ноды" || fail "порт из контейнера" "$(CT="$CT" CT_ENV="$CT_ENV" nport)"
+unset CT CT_ENV
+printf 'services:\n  remnanode:\n    image: remnawave/node:latest\n    env_file: .env\n' > "$NP/node/docker-compose.yml"
+printf 'NODE_PORT=5555\nSECRET_KEY=x\n' > "$NP/node/.env"
+[[ "$(nport)" == 5555 ]] && pass "отдельный каталог ноды — порт из её .env" || fail "порт из .env ноды" "$(nport)"
+rm -f "$NP/node/.env" "$NP/node/docker-compose.yml"
+printf 'services:\n  remnawave:\n    image: remnawave/backend:2\n  remnanode:\n    image: remnawave/node:1.6\n    environment:\n      APP_PORT: 6666\n' > "$NP/panel/docker-compose.yml"
+[[ "$(nport)" == 6666 ]] && pass "старые ноды: APP_PORT в блоке ноды" || fail "APP_PORT ноды" "$(nport)"
+nft() { echo "table inet fail2detect { set node_api { type inet_service; elements = { 3010, 2222 } } }"; }
+[[ "$(_fw_node_api_list)" == "3010,2222" ]] && _fw_node_api_has 2222 && ! _fw_node_api_has 222 && pass "порты из набора node_api действующих правил" || fail "_fw_node_api_list" "$(_fw_node_api_list)"
+unset -f nft
+
 section "Панель после переноса"
 st_lc_saved="${LC_ALL:-}"; export LC_ALL=C.UTF-8
 PD="$WORK/paneldir"; mkdir -p "$PD"; printf 'PANEL_DOMAIN=panel.example\n' > "$PD/.env"

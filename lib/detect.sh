@@ -105,10 +105,35 @@ rw_detect_report() {
 # NODE_PORT (API ноды, по умолчанию 2222); старые версии — APP_PORT
 detect_node_api_port() {
     [[ -n "$NODE_API_PORT" ]] && { echo "$NODE_API_PORT"; return; }
-    local d; d=$(node_dir); [[ -n "$d" ]] || return 1
-    local p
-    p=$(grep -oE '(NODE_PORT|APP_PORT)[=:][[:space:]]*"?[0-9]+' "$(compose_file "$d")" "$d/.env" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    local d p="" ct f; d=$(node_dir); [[ -n "$d" ]] || return 1
+    # 1) как запущена нода на самом деле — переменная NODE_PORT контейнера
+    ct=$(_rw_containers | awk -F'\t' '$2 ~ /^remnawave\/node/ && $4 == "running" {print $1; exit}')
+    [[ -n "$ct" ]] && p=$(docker inspect "$ct" -f '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -nE 's/^(NODE_PORT|APP_PORT)=([0-9]+).*/\2/p' | head -1)
+    # 2) блок сервиса ноды в compose. Весь файл не годится: у панели «всё в одном»
+    #    выше стоят APP_PORT=3000/3010 панели и подписки — их и брали за порт ноды.
+    if [[ -z "$p" ]] && f=$(compose_file "$d"); then
+        p=$(compose_service_block "$f" remnanode 'remnawave/node' | grep -oE '(NODE_PORT|APP_PORT)[=:][[:space:]]*"?[0-9]+' | grep -oE '[0-9]+$' | head -1)
+    fi
+    # 3) .env ноды — только если это её собственный каталог (у панели там APP_PORT панели)
+    if [[ -z "$p" && "$d" != "$RW_PANEL_DIR" && -f "$d/.env" ]]; then
+        p=$(grep -oE '^(NODE_PORT|APP_PORT)=[[:space:]]*"?[0-9]+' "$d/.env" | grep -oE '[0-9]+$' | head -1)
+    fi
     echo "${p:-2222}"
+}
+
+# строки одного сервиса из compose (по имени или по образу)
+compose_service_block() {   # файл сервис [образ]
+    awk -v svc="$2" -v img="${3:-}" '
+        function ind(s) { match(s, /^ */); return RLENGTH }
+        /^[^[:space:]#]/ { if (inb) flush(); top = ($0 ~ /^services:/); inb = 0; next }
+        top && /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ && (sind == "" || ind($0) == sind) {
+            sind = ind($0); name = $0; gsub(/[[:space:]:]/, "", name)
+            if (inb) flush(); inb = 1; buf = ""; cur = name; next
+        }
+        inb { buf = buf $0 "\n" }
+        function flush() { if (!done && (cur == svc || (img != "" && buf ~ ("image:[[:space:]]*[\"'\'']?" img)))) { printf "%s", buf; done = 1 } }
+        END { if (inb && !done) flush() }
+    ' "$1" | awk 'NF'   # без пустых строк
 }
 
 detect_ssh_ports() {

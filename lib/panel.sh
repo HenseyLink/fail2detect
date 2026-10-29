@@ -45,6 +45,10 @@ panel_docker_gateway() {
     docker inspect remnawave -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.Gateway}} {{$v.IPAddress}}{{"\n"}}{{end}}' 2>/dev/null | awk 'NF {print $1; exit}'
 }
 
+# порты из набора node_api действующей таблицы fail2detect
+_fw_node_api_list() { nft list set inet "$F2D_NFT_TABLE" node_api 2>/dev/null | sed -n 's/.*elements = { *\([^}]*\)}.*/\1/p' | tr -d ' '; }
+_fw_node_api_has() { [[ ",$(_fw_node_api_list)," == *",$1,"* ]]; }
+
 _is_private_ip() { [[ "$1" =~ ^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.) ]]; }
 
 # Нода на этом же сервере записана в панели адресом шлюза docker-сети. После переноса
@@ -96,8 +100,16 @@ panel_fix_local_node() {
         else
             info "UFW выключен — не мешает"
         fi
+        # фаервол fail2detect: порт API ноды должен быть в наборе node_api — проверяем
+        # действующие правила, а не код возврата (раньше порт мог определиться неверно)
         if nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1; then
-            fw_apply >/dev/null 2>&1 && ok "Фаервол fail2detect: API ноды открыт для docker-сетей (не с внешнего интерфейса)"
+            if ! _fw_node_api_has "$port"; then
+                warn "В правилах fail2detect порт API ноды — «$(_fw_node_api_list)», а нода слушает $port"
+                config_set NODE_API_PORT "$port" >/dev/null; NODE_API_PORT="$port"
+                fw_apply >/dev/null 2>&1
+            fi
+            if _fw_node_api_has "$port"; then ok "Фаервол fail2detect: порт $port открыт для docker-сети панели (снаружи — только для IP панели)"
+            else err "Порт $port так и не попал в правила fail2detect (fail2detect fw show)"; fi
         fi
         # 5) связь из контейнера панели (как ходит сама панель)
         local js="const s=require('net').connect($port,'$addr');s.setTimeout(4000);s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(2))"
