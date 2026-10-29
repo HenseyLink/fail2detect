@@ -92,7 +92,8 @@ EOF
     _site_page() {   # файл активный_пункт заголовок_страницы тело
         local nav="" p l
         for p in "/|Home" "/services/|Services" "/about/|About" "/contact/|Contact"; do
-            l="${p#*|}"; nav+="<a href=\"${p%%|*}\"$([[ "$l" == "$2" ]] && echo ' class="on"')>$l</a>"
+            l="${p#*|}"; local on=""; [[ "$l" == "$2" ]] && on=' class="on"'
+            nav+="<a href=\"${p%%|*}\"$on>$l</a>"
         done
         cat > "$1" <<EOF
 <!doctype html>

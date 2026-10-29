@@ -113,16 +113,16 @@ mkdir -p "$WORK/acme"
 cid=$(docker run -d -p 127.0.0.1:18443:443 -p 127.0.0.1:18080:80 -v "$WORK/site.conf:/etc/nginx/conf.d/default.conf:ro" \
     -v "$WORK/le:/etc/letsencrypt:ro" -v "$F2D_WEB_ROOT:/var/www/html:ro" -v "$WORK/acme:/var/www/acme:ro" "$NGINX_IMAGE")
 for _ in $(seq 1 20); do curl -sk -o /dev/null --resolve node.example.com:18443:127.0.0.1 https://node.example.com:18443/ && break; sleep 0.5; done
-req() { curl -sk --max-time 5 --resolve "node.example.com:$2:127.0.0.1" -o /dev/null -w '%{http_code}' "$1"; }
+req() { curl -sk --max-time 5 --resolve "node.example.com:$2:127.0.0.1" -o /dev/null -w '%{http_code}' "$1" || true; }
 [[ "$(req https://node.example.com:18443/ 18443)" == 200 ]] && pass "главная — 200" || fail "главная" "$(docker logs "$cid" 2>&1 | tail -3)"
 [[ "$(req https://node.example.com:18443/services/ 18443)" == 200 && "$(req https://node.example.com:18443/assets/site.css 18443)" == 200 ]] && pass "страницы и стили" || fail "страницы"
 [[ "$(req https://node.example.com:18443/wp-login.php 18443)" == 404 ]] && pass "несуществующий адрес — настоящий 404" || fail "404"
-curl -sk --resolve node.example.com:18443:127.0.0.1 https://node.example.com:18443/nope | grep -q 'Page not found' && pass "страница 404 оформлена как сайт" || fail "тело 404"
+{ curl -sk --resolve node.example.com:18443:127.0.0.1 https://node.example.com:18443/nope || true; } | grep -q 'Page not found' && pass "страница 404 оформлена как сайт" || fail "тело 404"
 [[ "$(req http://node.example.com:18080/about/ 18080)" == 301 ]] && pass "HTTP → 301 на HTTPS" || fail "HTTP 301"
-[[ "$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' --resolve other.example:18443:127.0.0.1 https://other.example:18443/)" == 000 ]] && pass "чужой SNI — обрыв рукопожатия" || fail "чужой SNI"
+[[ "$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' --resolve other.example:18443:127.0.0.1 https://other.example:18443/ || true)" == 000 ]] && pass "чужой SNI — обрыв рукопожатия" || fail "чужой SNI"
 # через unix-сокет с PROXY protocol — как подключается Reality
 docker exec "$cid" sh -c 'apk add -q curl >/dev/null 2>&1 || true'
-code=$(docker exec "$cid" curl -sk --max-time 5 --unix-socket /dev/shm/nginx.sock --haproxy-protocol -o /dev/null -w '%{http_code}' https://node.example.com/ 2>/dev/null)
+code=$(docker exec "$cid" curl -sk --max-time 5 --unix-socket /dev/shm/nginx.sock --haproxy-protocol -o /dev/null -w '%{http_code}' https://node.example.com/ 2>/dev/null) || true
 [[ "$code" == 200 ]] && pass "сокет + PROXY protocol (путь Reality) — сайт" || fail "сокет Reality" "код ${code:-нет}"
 docker rm -f "$cid" >/dev/null
 
