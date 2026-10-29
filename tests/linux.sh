@@ -702,8 +702,10 @@ RW_PANEL_DIR="$SAVED_PANEL_DIR"
 # перенос: все ssh/scp — через одно подключение (пароль один раз), у scp порт — -P
 SSH_LOG="$WORK/ssh.log"; : > "$SSH_LOG"
 ssh() { echo "ssh $*" >> "$SSH_LOG"; }; scp() { echo "scp $*" >> "$SSH_LOG"; }
-backup_create() { BACKUP_LAST="$WORK/panel-x.tar"; touch "$BACKUP_LAST"; }
-require_root() { :; }; have() { true; }; confirm() { [[ "$1" == Начать* ]]; }; curl() { echo 198.51.100.1; }
+# через eval: shellcheck 0.9 иначе считает вызовы выше «до определения» (SC2218)
+eval 'backup_create() { BACKUP_LAST="$WORK/panel-x.tar"; touch "$BACKUP_LAST"; }'
+eval 'confirm() { [[ "$1" == Начать* ]]; }'
+require_root() { :; }; have() { true; }; curl() { echo 198.51.100.1; }
 F2D_BACKUP_DIR="$WORK/mig"; panel_migrate --to root@203.0.113.9 -p 2202 < <(echo y) >/dev/null 2>&1
 n_ssh=$(grep -c '^ssh ' "$SSH_LOG"); n_ctl=$(grep -c 'ControlPath=' "$SSH_LOG")
 [[ "$n_ssh" -ge 3 && "$n_ctl" == "$(wc -l < "$SSH_LOG" | tr -d ' ')" ]] && pass "перенос: все $(wc -l < "$SSH_LOG" | tr -d ' ') вызова ssh/scp — через ControlMaster" || fail "ControlMaster" "$(cat "$SSH_LOG")"
