@@ -550,6 +550,14 @@ jq -e '.format == 1 and .panel_domain == "p.example" and .sub_domain == "s.examp
     and .paths == ["/opt/remnawave", "/opt/subscription", "/etc/fail2detect", "/etc/letsencrypt"]' >/dev/null <<<"$m" \
     && pass "опись: домены, число пользователей/нод/хостов, пути (без отсутствующих)" || fail "manifest" "$m"
 tar -xOf "$f" files.tar.gz | tar -tz | grep -q '^opt/remnawave/.env$' && pass "в копии .env панели (секреты)" || fail ".env в копии"
+# большая база: начало дампа читается без ложного «пустой» (SIGPIPE при pipefail, как в fail2detect)
+big=$( (set -o pipefail
+    docker() { case "$1" in ps) echo remnawave-db;; exec) printf -- '--\n-- PostgreSQL database cluster dump\n--\n'; awk 'BEGIN { for (i = 0; i < 200000; i++) print "INSERT INTO users VALUES (" i ", '"'"'user-with-some-long-name-to-fill-the-pipe'"'"');" }';; esac; }
+    bk_dump_db "$WORK/big.sql.gz" 2>&1 && echo OK) )
+[[ "$big" == *OK* ]] && pass "дамп большой базы (≈10 МБ SQL) с pipefail — принят" || fail "большой дамп" "$big"
+err_out=$( (docker() { case "$1" in ps) echo remnawave-db;; exec) echo 'pg_dumpall: error: connection failed' >&2; return 1;; esac; }
+    bk_dump_db "$WORK/bad.sql.gz" 2>&1) )
+[[ "$err_out" == *"connection failed"* ]] && pass "ошибка pg_dumpall показывается" || fail "текст ошибки pg_dumpall" "$err_out"
 # шифрование
 backup_create --out "$BKOUT" --password 'Secret-pass-1' --quiet; fe="$BACKUP_LAST"
 [[ "$fe" == *.tar.enc ]] && ! tar -tf "$fe" >/dev/null 2>&1 && pass "с паролем — .tar.enc, без пароля не читается" || fail "шифрование"

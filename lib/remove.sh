@@ -143,7 +143,7 @@ remove_panel() {   # [--reinstall]
     install -d -m 700 "$F2D_BACKUP_DIR"
     local ts dump; ts=$(date +%Y%m%d-%H%M%S); dump="$F2D_BACKUP_DIR/remnawave-db-$ts.sql.gz"
     if docker ps --format '{{.Names}}' | grep -qx remnawave-db; then
-        if docker exec remnawave-db pg_dumpall -U postgres 2>/dev/null | gzip > "$dump" && [[ -s "$dump" ]] && (( $(gzip -dc "$dump" | head -c 100 | wc -c) > 0 )); then
+        if bk_dump_db "$dump"; then
             chmod 600 "$dump"; ok "Дамп базы: $dump"
         else
             rm -f "$dump"; err "Дамп базы не получился"

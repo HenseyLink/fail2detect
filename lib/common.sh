@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.9.1-beta"
+F2D_VERSION="0.9.2-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
@@ -101,6 +101,18 @@ read_secret() {   # "вопрос"
             printf '%s?%s %s: %sпусто%s\n' "$C_YELLOW" "$C_RESET" "$prompt" "$C_GRAY" "$C_RESET" >&2
         fi
     fi
+    REPLY="$v"
+}
+
+# пароль: ввод не виден совсем (в отличие от read_secret для токенов, где видно начало),
+# пробелы внутри сохраняются
+read_password() {   # "вопрос"
+    local v=""
+    printf '%s?%s %s: ' "$C_YELLOW" "$C_RESET" "$1" >&2
+    if [[ -t 0 ]]; then IFS= read -rs v || true; else IFS= read -r v || true; fi
+    v="${v//$'\e[200~'/}"; v="${v//$'\e[201~'/}"; v="${v%$'\r'}"
+    if [[ -n "$v" ]]; then printf '%s%s%s\n' "$C_GREEN" "•••••••• (${#v} симв.)" "$C_RESET" >&2
+    else printf '%sпусто%s\n' "$C_GRAY" "$C_RESET" >&2; fi
     REPLY="$v"
 }
 

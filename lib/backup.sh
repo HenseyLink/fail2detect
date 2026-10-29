@@ -28,9 +28,19 @@ _bk_human() { awk -v b="$1" 'BEGIN { split("Б КБ МБ ГБ", u, " "); i = 1; 
 # ---------------------------------------------------------------- база
 bk_dump_db() {   # файл.sql.gz
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$RW_DB_CONTAINER" || { err "Контейнер базы $RW_DB_CONTAINER не запущен"; return 1; }
-    local user; user=$(bk_db_user)
-    docker exec "$RW_DB_CONTAINER" pg_dumpall -U "$user" --clean --if-exists 2>/dev/null | gzip > "$1"
-    gzip -dc "$1" 2>/dev/null | head -c 4096 | grep -q 'PostgreSQL database cluster dump' || { err "Дамп базы пустой или повреждён"; return 1; }
+    local user rc=0 errf hdr; user=$(bk_db_user)
+    errf="$(dirname "$1")/.pg_dumpall.err"
+    docker exec "$RW_DB_CONTAINER" pg_dumpall -U "$user" --clean --if-exists 2>"$errf" | gzip > "$1" || rc=$?
+    # Начало дампа читаем в переменную: на большой базе gzip получает SIGPIPE,
+    # когда head закрывает канал, и с pipefail проверка «падала» на целом дампе.
+    hdr=$(gzip -dc "$1" 2>/dev/null | head -c 4096) || true
+    if ((rc != 0)) || [[ "$hdr" != *'PostgreSQL database cluster dump'* ]]; then
+        err "Дамп базы не получился (pg_dumpall -U $user, код $rc)"
+        [[ -s "$errf" ]] && sed 's/^/    /' "$errf" | tail -5 >&2
+        rm -f "$errf"; return 1
+    fi
+    rm -f "$errf"
+    return 0
 }
 
 # Свежий том postgres сначала поднимает временный сервер (только unix-сокет) для
@@ -75,10 +85,10 @@ bk_decrypt() { F2D_BK_PASS="$3" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000
 _bk_ask_password() {   # → REPLY (пусто — без пароля)
     local p1
     while true; do
-        read_secret "Пароль для копии (Enter — без пароля)"; p1="$REPLY"
+        read_password "Пароль для копии (Enter — без пароля)"; p1="$REPLY"
         [[ -z "$p1" ]] && { REPLY=""; return 0; }
         ((${#p1} >= 8)) || { warn "Не короче 8 символов"; continue; }
-        read_secret "Повторите пароль"
+        read_password "Повторите пароль"
         [[ "$REPLY" == "$p1" ]] && return 0
         warn "Пароли не совпали"
     done
@@ -246,7 +256,7 @@ _bk_unpack() {   # файл каталог
     local f="$1" st="$2" tarf="$1"
     if [[ "$f" == *.enc ]]; then
         local pass="${F2D_BACKUP_PASS:-}"
-        [[ -n "$pass" ]] || { read_secret "Пароль копии"; pass="$REPLY"; }
+        [[ -n "$pass" ]] || { read_password "Пароль копии"; pass="$REPLY"; }
         bk_decrypt "$f" "$st/backup.tar" "$pass" || { err "Неверный пароль или копия повреждена"; return 1; }
         tarf="$st/backup.tar"
     fi

@@ -147,13 +147,13 @@ F2D_BACKUP_DIR="$WORK/bk"; mkdir -p "$F2D_BACKUP_DIR"
 pg_up() { docker run -d --name "$1" -e POSTGRES_PASSWORD=pw "$PG_IMAGE" >/dev/null; RW_DB_CONTAINER="$1" bk_db_wait 60; }
 pg_up f2d-pg-old && pass "старая база поднята" || fail "postgres не поднялся"
 docker exec f2d-pg-old psql -U postgres -q -c "create table users (id serial primary key, username text, sub_uuid uuid default gen_random_uuid());
-    create table nodes (id serial, name text); insert into users (username) select 'u' || g from generate_series(1, 250) g;
+    create table nodes (id serial, name text); insert into users (username) select 'user-' || g || '-' || md5(g::text) from generate_series(1, 120000) g;
     insert into nodes (name) values ('de1'), ('nl1');" >/dev/null
 RW_DB_CONTAINER=f2d-pg-old bk_dump_db "$WORK/db.sql.gz" && pass "дамп: $(gzip -dc "$WORK/db.sql.gz" | wc -l | tr -d ' ') строк SQL" || fail "дамп"
 pg_up f2d-pg-new && pass "новая чистая база" || fail "новая база"
 RW_DB_CONTAINER=f2d-pg-new bk_load_db "$WORK/db.sql.gz" && pass "дамп загружен в новую базу" || fail "загрузка" "$(tail -5 "$F2D_BACKUP_DIR/restore-psql.log" 2>/dev/null)"
 c=$(RW_DB_CONTAINER=f2d-pg-new bk_db_counts)
-[[ "$c" == "users=250 nodes=2" ]] && pass "данные на месте: $c" || fail "данные после восстановления" "$c"
+[[ "$c" == "users=120000 nodes=2" ]] && pass "данные на месте: $c" || fail "данные после восстановления" "$c"
 a=$(docker exec f2d-pg-old psql -U postgres -tAc "select string_agg(sub_uuid::text, ',' order by id) from users")
 b=$(docker exec f2d-pg-new psql -U postgres -tAc "select string_agg(sub_uuid::text, ',' order by id) from users")
 [[ -n "$a" && "$a" == "$b" ]] && pass "ссылки подписок (UUID) совпадают побайтно" || fail "UUID подписок разошлись"
