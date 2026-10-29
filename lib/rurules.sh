@@ -145,30 +145,70 @@ ru_rules_for_profile() {
 }
 
 # ---------- работающие ноды: через API панели ----------
-node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ]
-    local act="${1:-status}" ripe="" only="" ; shift || true
-    while (($#)); do case "$1" in --ripe) ripe=yes;; --no-ripe) ripe=no;; --profile) only="${2:?имя}"; shift;; esac; shift; done
-    case "$act" in block|direct|off|status|update) ;; *) die "node ru-traffic block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ]";; esac
+# выбрать профили: по именам/номерам из аргументов, --all, или спросить.
+# Профили мостов (белые списки) и другие, которые трогать нельзя, просто не выбирайте.
+_ru_pick_profiles() {   # profiles_jsonl all(0|1) имя_или_номер…  → uuid по строке
+    local profiles="$1" all="$2"; shift 2
+    local -a names=() uuids=(); local p
+    while IFS= read -r p; do names+=("$(jq -r .name <<<"$p")"); uuids+=("$(jq -r .uuid <<<"$p")"); done <<<"$profiles"
+    if [[ "$all" == 1 ]]; then printf '%s\n' "${uuids[@]}"; return 0; fi
+    local -a want=("$@")
+    if ((${#want[@]} == 0)); then
+        [[ -t 0 ]] || { err "Укажите профили: --profile ИМЯ (можно несколько) или --all"; return 1; }
+        echo >&2
+        echo "  ${C_BOLD}Для каких профилей?${C_RESET} Профили мостов (белые списки) не выбирайте." >&2
+        local i; for i in "${!names[@]}"; do printf '  %s%2d.%s %s\n' "$C_YELLOW" $((i + 1)) "$C_RESET" "${names[i]}" >&2; done
+        ask "Номера через пробел или запятую (all — все, Enter — отмена)" ""
+        [[ -n "$REPLY" ]] || { info "Отменено"; return 1; }
+        [[ "$REPLY" == all || "$REPLY" == все ]] && { printf '%s\n' "${uuids[@]}"; return 0; }
+        read -r -a want <<<"${REPLY//,/ }"
+    fi
+    local w j found out=()
+    for w in "${want[@]}"; do
+        found=""
+        if [[ "$w" =~ ^[0-9]+$ ]] && ((w >= 1 && w <= ${#uuids[@]})); then found="${uuids[w - 1]}"
+        else for j in "${!names[@]}"; do [[ "${names[j]}" == "$w" ]] && { found="${uuids[j]}"; break; }; done; fi
+        [[ -n "$found" ]] || { err "Нет профиля «${w}»"; return 1; }
+        [[ " ${out[*]} " == *" $found "* ]] || out+=("$found")
+    done
+    printf '%s\n' "${out[@]}"
+}
+
+node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ|№ …] [--all]
+    local act="${1:-status}" ripe="" all=0 ; shift || true
+    local -a sel=()
+    while (($#)); do
+        case "$1" in
+            --ripe) ripe=yes;; --no-ripe) ripe=no;; --all) all=1;;
+            --profile|-p) sel+=("${2:?имя профиля}"); shift;;
+            *) die "node ru-traffic block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ … | --all]";;
+        esac; shift
+    done
+    case "$act" in block|direct|off|status|update) ;; *) die "node ru-traffic block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ … | --all]";; esac
     rw_need_api || return 1
     local profiles; profiles=$(rw_api GET /api/config-profiles | jq -c '.response.configProfiles[]? | {uuid, name}')
     [[ -n "$profiles" ]] || die "В панели нет профилей конфигурации"
     if [[ "$act" == status ]]; then
         title "Российский трафик на нодах"
-        local p u n cfg pol
+        local p u n cfg pol i=0
         while IFS= read -r p; do
-            u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
+            i=$((i + 1)); u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
             cfg=$(rw_api GET "/api/config-profiles/$u" | jq -c '.response.config')
             pol=$(ru_policy_of "$cfg")
-            printf '  %-28s %s%s\n' "$n" "$(ru_policy_label "${pol%% *}")" "$([[ "$pol" == *ripe* ]] && echo " + сети RIPE")"
+            printf '  %s%2d.%s %-28s %s%s\n' "$C_YELLOW" "$i" "$C_RESET" "$n" "$(ru_policy_label "${pol%% *}")" "$([[ "$pol" == *ripe* ]] && echo " + сети RIPE")"
         done <<<"$profiles"
         return 0
     fi
     require_root
+    # update ничего не меняет по сути (только освежает сети RIPE) — без выбора берёт все профили с правилом
+    local picked
+    if [[ "$act" == update && $all == 0 && ${#sel[@]} -eq 0 ]]; then all=1; fi
+    picked=$(_ru_pick_profiles "$profiles" "$all" "${sel[@]}") || return 1
     local pfx=""; pfx=$(mktemp)
-    local p u n cfg cur new rules pol r
+    local p u n cfg cur new rules pol r done_names=()
     while IFS= read -r p; do
         u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
-        [[ -n "$only" && "$n" != "$only" ]] && continue
+        grep -qxF "$u" <<<"$picked" || continue
         cfg=$(rw_api GET "/api/config-profiles/$u" | jq -c '.response.config')
         cur=$(ru_policy_of "$cfg")
         pol="$act"; local use_ripe="$ripe"
@@ -187,12 +227,12 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
         r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$u" <<<"$new")")
         if jq -e '.response.uuid' >/dev/null <<<"$r"; then
             ok "«${n}»: $(ru_policy_label "$pol")$([[ "$use_ripe" == yes && "$pol" != off ]] && echo " + сети RIPE") — панель разошлёт конфиг на ноды"
+            done_names+=("$n")
         else
             err "«${n}» не обновлён: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
         fi
     done <<<"$profiles"
     rm -f "$pfx"
-    [[ "$act" != update ]] && config_set NODE_RU_POLICY "$act" >/dev/null
-    audit_write RU_TRAFFIC - - - "$act${ripe:+ ripe=$ripe}${only:+ профиль $only}"
+    audit_write RU_TRAFFIC - - - "$act${ripe:+ ripe=$ripe}: ${done_names[*]:-ничего}"
     return 0
 }

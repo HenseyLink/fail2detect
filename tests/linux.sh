@@ -674,6 +674,33 @@ printf 'services:\n  nginx:\n    image: nginx\n' > "$DT/opt/remnawave/docker-com
 [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "чужой compose в каталоге — не панель" || fail "чужой compose" "$(det)"
 unset CT
 
+section "Российский трафик: выбор профилей"
+RU_API_LOG="$WORK/ru-api.log"
+_ru_api() {
+    echo "$1 $2" >> "$RU_API_LOG"
+    case "$1 $2" in
+        "GET /api/config-profiles") echo '{"response":{"configProfiles":[{"uuid":"p1","name":"Main DE"},{"uuid":"p2","name":"Bridge RU"},{"uuid":"p3","name":"NL"}]}}';;
+        "GET /api/config-profiles/p3") echo '{"response":{"config":{"routing":{"rules":[{"ruleTag":"f2d-ru-ip","ip":["geoip:ru"],"outboundTag":"BLOCK"}]}}}}';;
+        "GET /api/config-profiles/"*) echo '{"response":{"config":{"routing":{"rules":[]}}}}';;
+        "PATCH /api/config-profiles") echo '{"response":{"uuid":"x"}}';;
+    esac
+}
+rw_api() { _ru_api "$@"; }; rw_need_api() { :; }; require_root() { :; }
+patched() { grep -c '^PATCH' "$RU_API_LOG"; }
+: > "$RU_API_LOG"; node_ru_traffic block --no-ripe --profile "Main DE" --profile 3 >/dev/null 2>&1 </dev/null
+[[ "$(patched)" == 2 ]] && grep -q 'GET /api/config-profiles/p1' "$RU_API_LOG" && grep -q 'GET /api/config-profiles/p3' "$RU_API_LOG" && ! grep -q 'p2' "$RU_API_LOG" \
+    && pass "по имени и номеру: «Main DE» и №3, мост не тронут" || fail "выбор профилей" "$(cat "$RU_API_LOG")"
+: > "$RU_API_LOG"; out=$(node_ru_traffic direct --no-ripe 2>&1 </dev/null)
+[[ "$(patched)" == 0 && "$out" == *"--profile"* ]] && pass "без выбора (не терминал) — отказ, ничего не меняется" || fail "без выбора" "$out"
+: > "$RU_API_LOG"; node_ru_traffic off --all >/dev/null 2>&1 </dev/null
+[[ "$(patched)" == 3 ]] && pass "--all — все профили" || fail "--all" "$(patched)"
+: > "$RU_API_LOG"; node_ru_traffic update --no-ripe >/dev/null 2>&1 </dev/null
+[[ "$(patched)" == 1 ]] && grep -q 'GET /api/config-profiles/p3' "$RU_API_LOG" && pass "update без выбора — только профили, где правило уже стоит" || fail "update" "$(cat "$RU_API_LOG")"
+: > "$RU_API_LOG"; out=$(node_ru_traffic block --no-ripe --profile Нет 2>&1 </dev/null)
+[[ "$(patched)" == 0 && "$out" == *"Нет профиля"* ]] && pass "несуществующий профиль — ошибка, ничего не меняется" || fail "чужое имя" "$out"
+unset -f rw_api rw_need_api require_root _ru_api patched
+source "$ROOT/lib/remnawave.sh"
+
 section "Порт API ноды"
 NP="$WORK/nodeport"; mkdir -p "$NP/panel" "$NP/node"
 cat > "$NP/panel/docker-compose.yml" <<'YML'

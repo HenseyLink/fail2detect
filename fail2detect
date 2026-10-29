@@ -97,9 +97,10 @@ ${C_BOLD}Резервные копии и перенос панели${C_RESET}
   panel migrate --to root@<новый сервер>   перенести панель целиком (копия → SSH → восстановление)
   panel check | fix | url   почему панель не открывается / починить ноду на этом сервере / ссылка входа
   node panel-ip <IP> [--replace <старый>]  на ноде: пустить новую панель после переноса
-  node ru-traffic block|direct|off|status|update [--ripe] [--profile ИМЯ]
+  node ru-traffic block|direct|off|status|update [--ripe] [--profile ИМЯ|№ …] [--all]
                             российский трафик на нодах (профили панели): блок или напрямую;
-                            --ripe — все IP-сети России из RIPE, update — обновить их
+                            профили — по именам/номерам из status (мосты не выбирайте), без них
+                            спросит; --ripe — все IP-сети России из RIPE, update — обновить их
 
 ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
@@ -316,6 +317,7 @@ menu_node() {
             8) menu_balancer;;
             9) node_ru_traffic status
                echo "   1. блокировать   2. напрямую   3. не трогать (убрать правило)   4. обновить сети RIPE"
+               echo "   ${C_GRAY}профили выберете следующим шагом — мосты для белых списков можно не трогать${C_RESET}"
                ask "Вариант" ""
                case "$REPLY" in
                    1|2) local pol=block; [[ "$REPLY" == 2 ]] && pol=direct
