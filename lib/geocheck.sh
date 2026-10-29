@@ -218,10 +218,19 @@ gr_mask() {   # 78.135.77.114 -> 78.135.*.*, 2a01:f900:11:5::1 -> 2a01:f900:11::
     else echo "${ip%.*.*}.*.*"; fi
 }
 
+# Временный каталог убираем явно: «trap … RETURN» оставался висеть и срабатывал
+# при выходе из ВЫЗВАВШЕЙ функции (меню), удаляя чужие каталоги.
 geocheck_run() {
+    local rc=0
+    GR_TMP=$(mktemp -d)
+    _geocheck_run "$@" || rc=$?
+    rm -rf "$GR_TMP"; GR_TMP=""
+    return "$rc"
+}
+
+_geocheck_run() {
     have jq || die "Нужен jq"
     local show_full=no; [[ "${1:-}" == --full ]] && show_full=yes
-    GR_TMP=$(mktemp -d); trap 'rm -rf "$GR_TMP"' RETURN
     local ip4 ip6 vers=()
     ip4=$(curl -4 -sS --max-time 6 https://api.ipify.org 2>/dev/null)
     ip6=$(curl -6 -sS --max-time 6 https://api6.ipify.org 2>/dev/null)

@@ -36,7 +36,7 @@ ufw_harden() {
     ufw logging low >/dev/null
     if has_node; then
         local api panels ip; api=$(detect_node_api_port); panels=$(detect_panel_ips)
-        if ufw status | grep -qE "^${api}(/tcp)?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere"; then
+        if grep -qE "^${api}(/tcp)?[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere" <<<"$(ufw status 2>/dev/null)"; then
             if [[ -n "$panels" ]]; then
                 ufw --force delete allow "$api/tcp" >/dev/null 2>&1; ufw --force delete allow "$api" >/dev/null 2>&1
                 for ip in $panels; do ufw_allow "$api" tcp "$ip" "Remnawave panel"; done
@@ -140,8 +140,9 @@ doctor() {
     else _chk bad "Таблица fail2detect не загружена" "fail2detect fw apply"; fi
     systemctl is-active --quiet fail2detect 2>/dev/null && _chk ok "Демон банов работает" || _chk bad "Демон банов не запущен" "systemctl enable --now fail2detect"
     if [[ "$(fw_mode)" == ufw ]]; then
-        ufw status verbose 2>/dev/null | grep -q 'deny (incoming)' && _chk ok "UFW: входящие по умолчанию запрещены" || _chk bad "UFW пропускает входящие по умолчанию" "ufw default deny incoming"
-        ufw status verbose 2>/dev/null | grep -qE '^Logging: on' && _chk ok "UFW логирует блокировки (нужно jail portscan)" || _chk warn "UFW не логирует блокировки — jail portscan слеп" "ufw logging low"
+        local uv; uv=$(ufw status verbose 2>/dev/null)
+        grep -q 'deny (incoming)' <<<"$uv" && _chk ok "UFW: входящие по умолчанию запрещены" || _chk bad "UFW пропускает входящие по умолчанию" "ufw default deny incoming"
+        grep -qE '^Logging: on' <<<"$uv" && _chk ok "UFW логирует блокировки (нужно jail portscan)" || _chk warn "UFW не логирует блокировки — jail portscan слеп" "ufw logging low"
     fi
     [[ -s "$F2D_STATE_DIR/blocklist4.txt" ]] && _chk ok "Блок-листы сканеров: $(wc -l < "$F2D_STATE_DIR/blocklist4.txt") сетей" || _chk warn "Блок-листы сканеров не загружены" "fail2detect blocklist update"
     [[ "$STEALTH_ICMP" == yes ]] && _chk ok "Сервер не отвечает на ping" || _chk warn "Сервер отвечает на ping"

@@ -582,7 +582,7 @@ node_add_api() {   # name address country host_address
     prefix=$(tag_prefix "$name")
     inbs=$(build_inbounds "$prefix") || return 1
     cfg=$(profile_config "$inbs")
-    r=$(rw_api POST /api/config-profiles "$(jq -n --arg n "f2d-${name:0:20}" --argjson c "$cfg" '{name:$n, config:$c}')")
+    r=$(rw_api POST /api/config-profiles "$(jq -c --arg n "f2d-${name:0:20}" '{name: $n, config: .}' <<<"$cfg")")
     puuid=$(jq -r '.response.uuid // empty' <<<"$r")
     [[ -n "$puuid" ]] || { err "Профиль не создан: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; return 1; }
     local -A uuid_of=(); local tag u

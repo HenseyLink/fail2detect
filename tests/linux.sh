@@ -628,6 +628,16 @@ c4=$(ru_apply_to_config '{"outbounds":[{"tag":"warp","protocol":"wireguard"}],"r
 [[ "$(jq -c '[.outbounds[].tag]' <<<"$c4")" == '["warp","DIRECT","BLOCK"]' ]] && pass "в чужом профиле добавляются outbound'ы DIRECT/BLOCK" || fail "outbounds" "$(jq -c .outbounds <<<"$c4")"
 [[ "$(printf '10.0.0.0/25\n10.0.0.128/25\n10.0.1.0/24\n10.0.0.0/24\n192.168.1.0/24\n192.168.3.0/24\n' | ru_aggregate_v4 | tr '\n' ' ')" == "10.0.0.0/23 192.168.1.0/24 192.168.3.0/24 " ]] \
     && pass "склейка IPv4: соседние и вложенные префиксы" || fail "ru_aggregate_v4"
+# настоящий объём (как у RIPE: ~11 тыс. сетей, правило > 128 КБ): Linux не пропускает
+# такой аргумент команды — всё должно идти через stdin/файлы
+seq 0 11999 | awk '{print int($1/256) + 1 "." ($1 % 256) ".0.0/16"}' > "$WORK/pfx-big"
+big=$(ru_rules_json direct yes "$WORK/pfx-big" 2>&1)
+[[ "$(jq '.[1].ip | length' <<<"$big" 2>/dev/null)" == 12001 && ${#big} -gt 140000 ]] && pass "правила на 12 тыс. сетей ($(( ${#big} / 1024 )) КБ) собираются" || fail "большие правила" "${big:0:300}"
+bigcfg=$(ru_apply_to_config "$base" "$big" 2>&1)
+[[ "$(ru_policy_of "$bigcfg")" == "direct ripe" ]] && pass "большие правила встают в профиль" || fail "большие правила в профиль" "${bigcfg:0:300}"
+body=$(rw_profile_body 11111111-2222-4333-8444-555555555555 <<<"$bigcfg" 2>&1)
+jq -e '.uuid and (.config.routing.rules | length) > 3' >/dev/null 2>&1 <<<"$body" && pass "тело PATCH профиля с большими правилами" || fail "rw_profile_body" "${body:0:300}"
+unset big bigcfg body
 # профиль при установке: выбор block + RIPE (RIPE — заглушка)
 curl() { jq -nc '{data: {resources: {ipv4: ([range(0; 1200)] | map("5.\(. / 256 | floor).\(. % 256).0/24")), ipv6: ["2a00:1::/32"]}}}'; }
 RU_RIPE_CACHE="$WORK/ru-cache.txt"
@@ -773,6 +783,22 @@ unset -f ssh scp backup_create require_root have confirm curl
 source "$ROOT/lib/common.sh"; source "$ROOT/lib/backup.sh"; load_config
 F2D_BACKUP_DIR="${F2D_STATE_DIR}/backup"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
+
+section "Устойчивость (pipefail, ловушки)"
+# IP администратора первым в длинном списке: с pipefail проверка не должна «терять» админа
+_many_admins() { echo 203.0.113.7; seq 1 200000 | awk '{print "10." int($1/65536) "." int($1/256)%256 "." $1%256}'; }
+adm=$(set -o pipefail; admin_ips() { _many_admins; }; TRUSTED_IPS=""; SSH_CLIENT=""; detect_panel_ips() { :; }; ban_ignored 203.0.113.7)
+[[ "$adm" == *администратора* ]] && pass "админ первым в длинном списке входов — не банится (pipefail)" || fail "admin_ips + pipefail" "$adm"
+# UFW включён и правил сотни: «Status: active» не теряется
+_big_ufw() { echo "Status: active"; echo; for i in $(seq 1 3000); do echo "$i/tcp ALLOW Anywhere # rule $i"; done; }
+# shellcheck source=/dev/null
+uact=$( (set -o pipefail; source "$ROOT/lib/detect.sh"; have() { true; }; ufw() { _big_ufw; }; ufw_active && echo on || echo off) )
+[[ "$uact" == on ]] && pass "ufw_active при 3000 правил и pipefail" || fail "ufw_active" "$uact"
+# GeoCheck/IPQuality не оставляют «trap … RETURN» (он срабатывал в вызвавшей функции)
+rtrap=$(trap -p RETURN)
+[[ -z "$rtrap" ]] && pass "нет висящих RETURN-ловушек" || fail "RETURN trap" "$rtrap"
+! grep -nE "trap [^#]*RETURN" "$ROOT"/lib/*.sh "$ROOT/fail2detect" | grep -v '^\s*#' | grep -vq '#.*trap … RETURN' \
+    && pass "в коде нет trap … RETURN" || fail "trap RETURN в коде" "$(grep -nE 'trap [^#]*RETURN' "$ROOT"/lib/*.sh)"
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

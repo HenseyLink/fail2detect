@@ -81,8 +81,8 @@ rw_detect_report() {
         local ct; ct=$(_rw_containers)
         if [[ -n "$ct" ]]; then
             echo "  ${C_BOLD}Контейнеры Remnawave${C_RESET}"
-            local n i w st
-            while IFS=$'\t' read -r n i w st; do printf '    %-28s %-36s %-9s %s\n' "$n" "$i" "$st" "${w:-—}"; done <<<"$ct"
+            # awk, а не read: пустой каталог (контейнер без compose) не сдвигает поля
+            awk -F'\t' '{ printf "    %-28s %-36s %-9s %s\n", $1, $2, $4, ($3 == "" ? "—" : $3) }' <<<"$ct"
         else
             warn "Контейнеров с образами remnawave/* нет (docker ps -a)"
         fi
@@ -163,7 +163,9 @@ detect_panel_ips() {
     ufw status 2>/dev/null | awk -v p="$port" '$1==p || $1==p"/tcp" {for(i=2;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) print $i}' | sort -u | xargs
 }
 
-ufw_active() { have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; }
+# вывод читаем целиком: «ufw status | grep -q» с pipefail ложно давал «выключен»
+# (grep выходит на первой строке, ufw получает SIGPIPE на длинном списке правил)
+ufw_active() { have ufw || return 1; local s; s=$(ufw status 2>/dev/null); [[ "$s" == *"Status: active"* ]]; }
 
 # итоговый режим фаервола
 fw_mode() {

@@ -392,7 +392,14 @@ ipquality_run() {   # [ip]
         [[ "$v6" == *:* ]] && { targets+=("$v6"); tags+=(IPv6); }
         ((${#targets[@]})) || die "Не удалось определить IP сервера"
     fi
-    local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+    local tmp; tmp=$(mktemp -d)
+    _ipquality_report "$tmp" || true
+    rm -rf "$tmp"
+}
+
+# отчёт по уже собранным целям (targets/tags — из ipquality_run); каталог — временный
+_ipquality_report() {
+    local tmp="$1"
 
     local i s vers=()
     for i in "${!targets[@]}"; do mkdir -p "$tmp/$i"; gc_fetch_dbs "$tmp/$i" "${targets[i]}"; done

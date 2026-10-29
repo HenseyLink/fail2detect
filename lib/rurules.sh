@@ -80,19 +80,22 @@ ru_ripe_prefixes() {
 ru_rules_json() {   # политика ripe [файл_префиксов]
     local pol="$1" ripe="${2:-no}" pfx="${3:-}" tag
     case "$pol" in block) tag=BLOCK;; direct) tag=DIRECT;; *) echo '[]'; return 0;; esac
-    local doms ips
-    doms=$( { echo "geosite:category-ru"; printf 'domain:%s\n' "${RU_TLDS[@]}" "${RU_SERVICES[@]}"; } | jq -R . | jq -sc .)
-    if [[ "$ripe" == yes && -n "$pfx" && -s "$pfx" ]]; then ips=$( { echo "geoip:ru"; cat "$pfx"; } | jq -R . | jq -sc 'map(select(. != ""))')
-    else ips='["geoip:ru"]'; fi
-    jq -nc --arg t "$tag" --argjson d "$doms" --argjson i "$ips" \
-        '[{ruleTag: "f2d-ru-domains", domain: $d, outboundTag: $t}, {ruleTag: "f2d-ru-ip", ip: $i, outboundTag: $t}]'
+    # Список сетей RIPE (~190 КБ) идёт в jq только через stdin: аргумент команды
+    # в Linux ограничен 128 КБ («Argument list too long»).
+    local doms; doms=$( { echo "geosite:category-ru"; printf 'domain:%s\n' "${RU_TLDS[@]}" "${RU_SERVICES[@]}"; } | jq -R . | jq -sc .)
+    {
+        echo "geoip:ru"
+        [[ "$ripe" == yes && -n "$pfx" && -s "$pfx" ]] && cat "$pfx"
+    } | jq -R . | jq -sc --arg t "$tag" --argjson d "$doms" \
+        'map(select(. != "")) as $i | [{ruleTag: "f2d-ru-domains", domain: $d, outboundTag: $t}, {ruleTag: "f2d-ru-ip", ip: $i, outboundTag: $t}]'
 }
 
 # вставить правила в конфиг профиля: старые f2d-ru-* убрать, новые — сразу после
 # блокировки частных сетей (до остальных правил, чтобы их не обходили)
 ru_apply_to_config() {   # config_json rules_json
-    jq -c --argjson r "$2" '
-        .routing = (.routing // {})
+    # правила — через файловый дескриптор (могут быть больше 128 КБ)
+    jq -c --slurpfile rr <(printf '%s' "$2") '$rr[0] as $r
+        | .routing = (.routing // {})
         | .routing.rules = ((.routing.rules // []) | map(select((.ruleTag // "") | startswith("f2d-ru-") | not)))
         | (.routing.rules | map((.ip // []) | index("geoip:private") != null) | index(true)) as $p
         | .routing.rules = (if $p == null then $r + .routing.rules else .routing.rules[:$p + 1] + $r + .routing.rules[$p + 1:] end)
@@ -181,7 +184,7 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
         fi
         rules=$(ru_rules_json "$pol" "$use_ripe" "$pfx")
         new=$(ru_apply_to_config "$cfg" "$rules")
-        r=$(rw_api PATCH /api/config-profiles "$(jq -nc --arg u "$u" --argjson c "$new" '{uuid: $u, config: $c}')")
+        r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$u" <<<"$new")")
         if jq -e '.response.uuid' >/dev/null <<<"$r"; then
             ok "«${n}»: $(ru_policy_label "$pol")$([[ "$use_ripe" == yes && "$pol" != off ]] && echo " + сети RIPE") — панель разошлёт конфиг на ноды"
         else

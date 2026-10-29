@@ -164,14 +164,26 @@ cmd_update() {
 cmd_uninstall() {
     require_root
     confirm "Удалить fail2detect? Баны будут сняты, UFW останется как есть" n || return 0
-    systemctl disable --now fail2detect.service fail2detect-blocklist.timer >/dev/null 2>&1
-    rm -f /etc/systemd/system/fail2detect.service /etc/systemd/system/fail2detect-blocklist.{service,timer}
+    systemctl disable --now fail2detect.service fail2detect-blocklist.timer fail2detect-backup.timer >/dev/null 2>&1
+    rm -f /etc/systemd/system/fail2detect.service /etc/systemd/system/fail2detect-blocklist.{service,timer} /etc/systemd/system/fail2detect-backup.{service,timer}
     systemctl daemon-reload
     fw_disable
     rm -f /usr/local/bin/fail2detect
     [[ "$(readlink -f /usr/local/bin/f2d 2>/dev/null)" == "$F2D_BIN" ]] && rm -f /usr/local/bin/f2d
-    confirm "Удалить конфиги и журнал аудита ($F2D_CONF_DIR, $F2D_LOG_DIR)?" n && rm -rf "$F2D_CONF_DIR" "$F2D_LOG_DIR" "$F2D_STATE_DIR"
-    rm -rf "$F2D_SHARE"
+    if confirm "Удалить конфиги и журнал аудита ($F2D_CONF_DIR, $F2D_LOG_DIR)?" n; then
+        rm -rf "$F2D_CONF_DIR" "$F2D_LOG_DIR"
+        # копии панели и дампы базы — отдельно: их потеря необратима
+        local bk="$F2D_STATE_DIR/backup"
+        if compgen -G "$bk/*" >/dev/null && ! confirm "Удалить и резервные копии панели ($bk)?" n; then
+            find "$F2D_STATE_DIR" -mindepth 1 -maxdepth 1 ! -name backup -exec rm -rf {} + 2>/dev/null
+            info "Копии оставлены: $bk"
+        else
+            rm -rf "$F2D_STATE_DIR"
+        fi
+    fi
+    # программу удаляем только из установочного каталога, а не откуда угодно (клон репозитория и т.п.)
+    if [[ "$F2D_SHARE" == /opt/fail2detect ]]; then rm -rf "$F2D_SHARE"
+    else info "Файлы программы не в /opt/fail2detect — оставляю их: $F2D_SHARE"; fi
     ok "fail2detect удалён"
 }
 

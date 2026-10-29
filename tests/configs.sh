@@ -58,7 +58,8 @@ fi
 # российский трафик: правила в профиле — Xray должен их принять (geosite:category-ru, ruleTag)
 for pol in block direct; do
     inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443" | jq --arg id "$uuid" '.settings.clients=[{id:$id, flow:"xtls-rprx-vision"}]')
-    printf '5.1.1.0/24\n2a00:1::/32\n' > "$WORK/ru-pfx"
+    # объём как у RIPE (~11 тыс. сетей, > 128 КБ) — Xray и наш код должны это переварить
+    { seq 0 10999 | awk '{print int($1/256) + 1 "." ($1 % 256) ".0.0/16"}'; echo '2a00:1::/32'; } > "$WORK/ru-pfx"
     cfg=$(NODE_RU_POLICY=off profile_config "$inb")
     ru_apply_to_config "$cfg" "$(ru_rules_json "$pol" yes "$WORK/ru-pfx")" > "$WORK/ru-$pol.json"
     if res=$(docker run --rm -v "$WORK/ru-$pol.json:/c.json:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then

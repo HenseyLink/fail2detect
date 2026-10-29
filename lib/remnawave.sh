@@ -49,6 +49,10 @@ rw_token() {
 }
 
 # rw_api METHOD /api/path [json] — тело ответа в stdout
+# тело PATCH /api/config-profiles: конфиг читается из stdin — с правилами RIPE он
+# больше 128 КБ и не помещается в аргумент jq (Linux: «Argument list too long»)
+rw_profile_body() { jq -c --arg u "$1" '{uuid: $u, config: .}'; }
+
 rw_api() {
     local method="$1" path="$2" data="${3:-}" token hdr
     token=$(rw_token) || return 1
@@ -235,7 +239,7 @@ node_port_change() {   # new_port [tag]
     local cfg r; cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --arg t "$tag" --argjson n "$new" '
         .response.config | .inbounds |= map(if .tag == $t then .port = $n else . end)')
     [[ -n "$cfg" && "$cfg" != null ]] || die "Не удалось получить конфиг профиля"
-    r=$(rw_api PATCH /api/config-profiles "$(jq -n --arg u "$puuid" --argjson c "$cfg" '{uuid:$u, config:$c}')")
+    r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null || echo "$r")"
     ok "Профиль обновлён — панель разошлёт конфиг на ноды"
 
@@ -310,7 +314,7 @@ node_transport_change() {   # [tag]
     # 2) профиль
     local cfg r; cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --arg t "$tag" --argjson n "$new" '
         .response.config | .inbounds |= map(if .tag == $t then $n else . end)')
-    r=$(rw_api PATCH /api/config-profiles "$(jq -n --arg u "$puuid" --argjson c "$cfg" '{uuid:$u, config:$c}')")
+    r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null || echo "$r")"
     ok "Профиль обновлён"
 
@@ -396,7 +400,7 @@ node_transport_add() {   # [tag-образца]
     prefix=$(tag_prefix "${rtag%%_*}")
     inbs=$(build_inbounds "$prefix" "$opriv" "$osid") || return 1
     cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --argjson n "$inbs" '.response.config | .inbounds += $n')
-    r=$(rw_api PATCH /api/config-profiles "$(jq -n --arg u "$puuid" --argjson c "$cfg" '{uuid:$u, config:$c}')")
+    r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
     ok "Профиль обновлён"
     local -A uuid_of=(); local tag u
@@ -520,7 +524,7 @@ node_logs_enable() {
     [[ -n "$puuid" ]] || die "Профиль не выбран"
     local cfg r
     cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq '.response.config | .log = ((.log // {}) + {loglevel:"info", error:"/var/log/remnanode/error.log", access:"none"})')
-    r=$(rw_api PATCH /api/config-profiles "$(jq -n --arg u "$puuid" --argjson c "$cfg" '{uuid:$u, config:$c}')")
+    r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $r"
     ok "Xray пишет ошибки в /var/log/remnanode/error.log"
     if has_node; then

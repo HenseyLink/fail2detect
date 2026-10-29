@@ -91,7 +91,9 @@ ban_ignored() {   # почему этот IP банить нельзя (пуст
     # адрес текущей SSH-сессии администратора
     [[ -n "${SSH_CLIENT:-}" && "$ip" == "${SSH_CLIENT%% *}" ]] && { echo "ваша SSH-сессия"; return; }
     # демон работает под systemd и SSH_CLIENT не видит — смотрим, кто реально вошёл
-    admin_ips | grep -qxF "$ip" && { echo "IP администратора (успешный вход по SSH)"; return; }
+    # список читаем целиком: «admin_ips | grep -q» с pipefail мог вернуть «не админ»
+    # (grep выходит на первом совпадении, функция получает SIGPIPE на следующей строке)
+    grep -qxF "$ip" <<<"$(admin_ips)" && { echo "IP администратора (успешный вход по SSH)"; return; }
     return 0
 }
 

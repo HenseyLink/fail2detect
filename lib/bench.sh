@@ -120,7 +120,7 @@ bench_ping() {   # хост [порт] → "мс потери" (мс с ≈ — 
 bench_iperf() {   # хост порт reverse(yes|no)
     local h="$1" p="$2" try port r args=(-c "$1" -P "$BENCH_THREADS" -t "$BENCH_DUR" -O 2 -J)
     [[ "$3" == yes ]] && args+=(-R)
-    iperf3 --help 2>&1 | grep -q -- '--connect-timeout' && args+=(--connect-timeout 4000)
+    [[ "$(iperf3 --help 2>&1)" == *--connect-timeout* ]] && args+=(--connect-timeout 4000)
     for try in 1 2 3; do
         # у многих публичных серверов несколько портов подряд
         for port in "$p" $((p + 1)) $((p + 2)); do
