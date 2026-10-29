@@ -704,6 +704,43 @@ r_err=$( (printf '%s\n' 7 7 7 7 7 7 7 > "$CURL_RC"; source "$ROOT/lib/remnawave.
     RW_API_URL="https://panel.example"; _RW_LOCAL=""; rw_api PATCH /x '{}' >/dev/null 2>&1; echo "$RW_API_ERROR") )
 [[ "$r_err" == *"Couldn't connect"* ]] && pass "причина ошибки сохраняется (RW_API_ERROR)" || fail "RW_API_ERROR" "$r_err"
 
+section "Обход в подписке (JSON-шаблоны)"
+DEF_TPL='{"dns":{"servers":["1.1.1.1"]},"routing":{"rules":[{"type":"field","protocol":["bittorrent"],"outboundTag":"direct"}],"domainStrategy":"IPIfNonMatch"},"outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"block","protocol":"blackhole"}]}'
+br=$(ru_bypass_rules_json no)
+jq -e 'length == 2 and all(.outboundTag == "direct") and (.[0].domain | index("domain:ru") and index("domain:yandex.net") and (index("geosite:category-ru") | not))
+    and .[1].ip == ["geoip:ru"]' >/dev/null <<<"$br" && pass "обход → direct: зоны, сервисы, geoip:ru; без geosite:category-ru" || fail "правила обхода" "$br"
+t1=$(ru_bypass_apply "$DEF_TPL" "$br")
+jq -e '.routing.rules[0].ruleTag == "f2d-ru-bypass-domains" and .routing.rules[1].ruleTag == "f2d-ru-bypass-ip" and .routing.rules[2].protocol == ["bittorrent"]
+    and ([.outbounds[].tag] == ["direct", "block"])' >/dev/null <<<"$t1" && pass "в стандартном шаблоне: обход первым, остальное на месте" || fail "ru_bypass_apply" "$(jq -c .routing.rules <<<"$t1")"
+t2=$(ru_bypass_apply "$t1" "$br"); [[ "$(jq '[.routing.rules[] | select(.ruleTag // "" | startswith("f2d-ru-bypass"))] | length' <<<"$t2")" == 2 ]] && pass "повторно — без дублей" || fail "дубли обхода"
+t3=$(ru_bypass_apply "$t2" '[]'); [[ "$(ru_bypass_of "$t3")" == off && "$(jq '.routing.rules | length' <<<"$t3")" == 1 ]] && pass "отключение убирает только обход" || fail "bypass off"
+t4=$(ru_bypass_apply '{"outbounds":[{"tag":"block","protocol":"blackhole"}]}' "$br")
+[[ "$(jq -c '[.outbounds[].tag]' <<<"$t4")" == '["block","direct"]' ]] && pass "нет direct — добавляется в конец (не первым: иначе всё пошло бы мимо VPN)" || fail "direct outbound" "$(jq -c .outbounds <<<"$t4")"
+seq 0 500 | awk '{print "10." int($1/256) "." ($1%256) ".0/24"}' > "$WORK/bp-pfx"
+[[ "$(ru_bypass_of "$(ru_bypass_apply "$DEF_TPL" "$(ru_bypass_rules_json yes "$WORK/bp-pfx")")")" == "bypass ripe" ]] && pass "обход + сети RIPE определяется" || fail "bypass ripe"
+bal=$(balancer_template_json "$t1" no)
+jq -e '(.routing.rules | map(.ruleTag // "") | index("f2d-ru-bypass-domains")) < (.routing.rules | map(.balancerTag // "") | index("auto"))' >/dev/null <<<"$bal" \
+    && pass "балансировщик «Авто» сохраняет обход до правила «всё → auto»" || fail "обход в «Авто»" "$(jq -c .routing.rules <<<"$bal")"
+# выбор шаблонов
+BP_LOG="$WORK/bp-api.log"
+_bp_api() {
+    echo "$1 $2" >> "$BP_LOG"
+    case "$1 $2" in
+        "GET /api/subscription-templates") echo '{"response":{"templates":[{"uuid":"t1","name":"Default","templateType":"XRAY_JSON"},{"uuid":"t2","name":"fail2detect Auto","templateType":"XRAY_JSON"},{"uuid":"m1","name":"Default","templateType":"MIHOMO"}]}}';;
+        "GET /api/subscription-templates/"*) jq -nc --argjson t "$DEF_TPL" '{response: {templateJson: $t}}';;
+        "PATCH /api/subscription-templates") echo '{"response":{"uuid":"x"}}';;
+        "GET /api/subscription-settings") echo '{"response":{"uuid":"s","serveJsonAtBaseSubscription":true}}';;
+    esac
+}
+rw_api() { _bp_api "$@"; }; rw_need_api() { :; }; require_root() { :; }
+: > "$BP_LOG"; node_ru_traffic bypass --no-ripe --template 1 >/dev/null 2>&1 </dev/null
+[[ "$(grep -c '^PATCH' "$BP_LOG")" == 1 ]] && grep -q 'GET /api/subscription-templates/t1' "$BP_LOG" && ! grep -q 't2\|m1' "$BP_LOG" \
+    && pass "обход только в выбранном шаблоне (Mihomo и прочие не трогаются)" || fail "выбор шаблонов" "$(cat "$BP_LOG")"
+: > "$BP_LOG"; out=$(node_ru_traffic bypass --no-ripe 2>&1 </dev/null)
+[[ "$(grep -c '^PATCH' "$BP_LOG")" == 0 && "$out" == *"--template"* ]] && pass "без выбора — отказ, ничего не меняется" || fail "без выбора" "$out"
+unset -f rw_api rw_need_api require_root _bp_api
+source "$ROOT/lib/remnawave.sh"
+
 section "Российский трафик: выбор профилей"
 RU_API_LOG="$WORK/ru-api.log"
 _ru_api() {

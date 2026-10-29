@@ -26,8 +26,9 @@ RU_RIPE_CACHE="${F2D_STATE_DIR}/ru-prefixes.txt"
 
 ru_policy_label() {
     case "$1" in
-        block) echo "блокировать (российские сайты не видят ноду)";;
-        direct) echo "напрямую (явно, мимо других правил)";;
+        block) echo "блокировать на ноде (российские сайты не видят IP ноды)";;
+        direct) echo "напрямую с ноды (сайт видит IP ноды; мимо WARP/каскада)";;
+        bypass) echo "обход: мимо VPN на устройстве (в подписке JSON)";;
         off|"") echo "не трогать";;
         *) echo "$1";;
     esac
@@ -119,8 +120,8 @@ ask_ru_policy() {   # [код_страны]
     echo "  ${C_BOLD}Российский трафик через ноду${C_RESET}"
     echo "  Если у клиента сломается маршрутизация (гео-базы на GitHub изменят или удалят),"
     echo "  российские сайты пойдут через ноду и увидят её IP. Правило на ноде это закрывает."
-    echo "   1. блокировать (рекомендуется для зарубежной ноды)"
-    echo "   2. напрямую"
+    echo "   1. блокировать (рекомендуется для зарубежной ноды: российские сайты не увидят её IP)"
+    echo "   2. напрямую с ноды (сайт увидит IP ноды — только против WARP/каскада в профиле)"
     echo "   3. не трогать${def:+$([[ $def == 3 ]] && echo " (нода в России — например, мост для белых списков)")}"
     ask "Вариант" "$def"
     case "$REPLY" in 1) NODE_RU_POLICY=block;; 2) NODE_RU_POLICY=direct;; *) NODE_RU_POLICY=off;; esac
@@ -128,6 +129,7 @@ ask_ru_policy() {   # [код_страны]
     if [[ "$NODE_RU_POLICY" != off ]]; then
         confirm "Добавить все IP-сети России из реестра RIPE (не зависит от гео-баз GitHub)?" y && NODE_RU_RIPE=yes
     fi
+    [[ "$NODE_RU_POLICY" == block ]] && info "Чтобы российское шло мимо VPN с домашнего IP пользователя — обход в подписке: f2d node ru-traffic bypass"
     NODE_RU_POLICY_SET=1
     config_set NODE_RU_POLICY "$NODE_RU_POLICY" >/dev/null 2>&1
     config_set NODE_RU_RIPE "$NODE_RU_RIPE" >/dev/null 2>&1
@@ -144,19 +146,135 @@ ru_rules_for_profile() {
     return 0
 }
 
+# ---------- «Обход»: российское мимо VPN на устройстве ----------
+# Нода не может отправить пакет «с домашнего IP» — туда трафик приходит уже из
+# туннеля. Настоящий обход делает клиент, и правило ему можно отдать через
+# подписку: в JSON-шаблоны (XRAY_JSON) панели. Панель ставит выходы серверов
+# первыми, а «direct» шаблона — следом, поэтому правило «российское → direct»
+# ведёт такой трафик мимо VPN. Happ в режиме JSON свою маршрутизацию не
+# применяет — работают только правила из конфига, как раз это.
+#   * зоны .ru .su .рф … и российские сервисы на иностранных доменах — без баз;
+#   * geoip:ru — эта категория есть в любых geoip.dat;
+#   * geosite:category-ru не берём: если её нет в гео-файлах приложения,
+#     Xray на устройстве не запустится;
+#   * сети RIPE — по желанию: подписка JSON несёт конфиг на каждый сервер,
+#     и ~190 КБ списка добавятся к каждому.
+ru_bypass_rules_json() {   # ripe(yes|no) [файл_префиксов]
+    local doms; doms=$(printf 'domain:%s\n' "${RU_TLDS[@]}" "${RU_SERVICES[@]}" | jq -R . | jq -sc .)
+    {
+        echo "geoip:ru"
+        [[ "${1:-no}" == yes && -n "${2:-}" && -s "$2" ]] && cat "$2"
+    } | jq -R . | jq -sc --argjson d "$doms" \
+        'map(select(. != "")) as $i | [{ruleTag: "f2d-ru-bypass-domains", domain: $d, outboundTag: "direct"},
+                                       {ruleTag: "f2d-ru-bypass-ip", ip: $i, outboundTag: "direct"}]'
+}
+
+# вставить в шаблон подписки: старые f2d-ru-bypass-* убрать, новые — первыми
+# (до правила балансировщика «всё → auto»), выход direct — добавить, если нет
+ru_bypass_apply() {   # template_json rules_json ('[]' — убрать)
+    jq -c --slurpfile rr <(printf '%s' "$2") '$rr[0] as $r
+        | .routing = (.routing // {})
+        | .routing.rules = ($r + ((.routing.rules // []) | map(select((.ruleTag // "") | startswith("f2d-ru-bypass-") | not))))
+        | if ($r | length) > 0 and ((.outbounds // []) | map(.tag) | index("direct") | not)
+          then .outbounds = ((.outbounds // []) + [{tag: "direct", protocol: "freedom"}]) else . end' <<<"$1"
+}
+
+ru_bypass_of() {   # template_json → "bypass ripe" / "bypass" / "off"
+    jq -r '[.routing.rules[]? | select((.ruleTag // "") | startswith("f2d-ru-bypass-"))] as $r
+        | if ($r | length) == 0 then "off" else "bypass" + (if ([$r[] | .ip // [] | length] | max) > 100 then " ripe" else "" end) end' <<<"$1"
+}
+
+# JSON-шаблоны подписки: uuid, имя
+_ru_templates() {
+    rw_api GET /api/subscription-templates | jq -c '.response.templates[]? | select(.templateType == "XRAY_JSON") | {uuid, name}'
+}
+
+node_ru_bypass() {   # on|off|status|update [--ripe|--no-ripe] [--template ИМЯ|№ …] [--all]
+    local act="${1:-status}" ripe="" all=0; shift || true
+    local -a sel=()
+    while (($#)); do
+        case "$1" in
+            --ripe) ripe=yes;; --no-ripe) ripe=no;; --all) all=1;;
+            --template|-t|--profile|-p) sel+=("${2:?имя шаблона}"); shift;;
+            *) die "node ru-traffic bypass|bypass-off [--ripe] [--template ИМЯ … | --all]";;
+        esac; shift
+    done
+    rw_need_api || return 1
+    local tpls; tpls=$(_ru_templates)
+    if [[ -z "$tpls" ]]; then
+        # для status/update это не ошибка — обходу просто негде быть
+        [[ "$act" == status || "$act" == update ]] && return 0
+        err "В панели нет JSON-шаблонов подписки (XRAY_JSON)"; return 1
+    fi
+    if [[ "$act" == status ]]; then
+        title "Обход в подписке (JSON-шаблоны)"
+        local p u n t pol i=0
+        while IFS= read -r p; do
+            i=$((i + 1)); u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
+            t=$(rw_api GET "/api/subscription-templates/$u" | jq -c '.response.templateJson // {}')
+            pol=$(ru_bypass_of "$t")
+            printf '  %s%2d.%s %-28s %s\n' "$C_YELLOW" "$i" "$C_RESET" "$n" \
+                "$([[ "$pol" == off ]] && echo "нет" || echo "обход$([[ "$pol" == *ripe* ]] && echo " + сети RIPE")")"
+        done <<<"$tpls"
+        local jb; jb=$(bal_json_base 2>/dev/null)
+        [[ "$jb" == false ]] && echo "  ${C_GRAY}JSON отдаётся только клиентам, которые сами его просят: «Отдавать JSON на базовом пути подписки» выключено${C_RESET}"
+        return 0
+    fi
+    require_root
+    [[ "$act" == update && $all == 0 && ${#sel[@]} -eq 0 ]] && all=1
+    local picked
+    picked=$(RU_PICK_WHAT="шаблонов" RU_PICK_FLAG=template RU_PICK_HINT="Обычно — Default (все хосты) и «fail2detect Auto»." \
+        _ru_pick_profiles "$tpls" "$all" "${sel[@]}") || return 1
+    local pfx; pfx=$(mktemp)
+    local p u n t cur new rules r use_ripe done_names=()
+    while IFS= read -r p; do
+        u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
+        grep -qxF "$u" <<<"$picked" || continue
+        t=$(rw_api GET "/api/subscription-templates/$u" | jq -c '.response.templateJson // {}')
+        cur=$(ru_bypass_of "$t")
+        use_ripe="$ripe"
+        case "$act" in
+            on) [[ -z "$use_ripe" ]] && { [[ "$cur" == *ripe* ]] && use_ripe=yes || use_ripe=no; };;
+            update) [[ "$cur" == off ]] && continue; [[ "$cur" == *ripe* ]] && use_ripe=yes || use_ripe=no;;
+            off) use_ripe=no;;
+        esac
+        if [[ "$use_ripe" == yes && ! -s "$pfx" ]]; then
+            info "Скачиваю IP-сети России из RIPE…"
+            ru_ripe_prefixes > "$pfx" || { warn "RIPE недоступен — без списка сетей"; use_ripe=no; }
+        fi
+        if [[ "$act" == off ]]; then rules='[]'; else rules=$(ru_bypass_rules_json "$use_ripe" "$pfx"); fi
+        new=$(ru_bypass_apply "$t" "$rules")
+        r=$(rw_api PATCH /api/subscription-templates "$(jq -c --arg u "$u" '{uuid: $u, templateJson: .}' <<<"$new")")
+        if jq -e '.response.uuid' >/dev/null 2>&1 <<<"$r"; then
+            if [[ "$act" == off ]]; then ok "«${n}»: обход убран"
+            else ok "«${n}»: обход$([[ "$use_ripe" == yes ]] && echo " + сети RIPE") — клиенты получат его при обновлении подписки"; fi
+            done_names+=("$n")
+        elif [[ -z "$r" ]]; then err "«${n}» не обновлён: панель не ответила${RW_API_ERROR:+ ($RW_API_ERROR)}"
+        else err "«${n}» не обновлён: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
+    done <<<"$tpls"
+    rm -f "$pfx"
+    if [[ "$act" == on && ${#done_names[@]} -gt 0 && "$(bal_json_base 2>/dev/null)" == false ]]; then
+        info "Обход работает у клиентов, получающих подписку JSON. Happ и INCY по обычной ссылке получают JSON,"
+        info "если включено «Отдавать JSON на базовом пути подписки» (его включает f2d balancer setup)."
+    fi
+    audit_write RU_BYPASS - - - "$act${ripe:+ ripe=$ripe}: ${done_names[*]:-ничего}"
+    return 0
+}
+
 # ---------- работающие ноды: через API панели ----------
 # выбрать профили: по именам/номерам из аргументов, --all, или спросить.
 # Профили мостов (белые списки) и другие, которые трогать нельзя, просто не выбирайте.
 _ru_pick_profiles() {   # profiles_jsonl all(0|1) имя_или_номер…  → uuid по строке
     local profiles="$1" all="$2"; shift 2
+    local what="${RU_PICK_WHAT:-профилей}" hint="${RU_PICK_HINT:-Профили мостов (белые списки) не выбирайте.}"
     local -a names=() uuids=(); local p
     while IFS= read -r p; do names+=("$(jq -r .name <<<"$p")"); uuids+=("$(jq -r .uuid <<<"$p")"); done <<<"$profiles"
     if [[ "$all" == 1 ]]; then printf '%s\n' "${uuids[@]}"; return 0; fi
     local -a want=("$@")
     if ((${#want[@]} == 0)); then
-        [[ -t 0 ]] || { err "Укажите профили: --profile ИМЯ (можно несколько) или --all"; return 1; }
+        [[ -t 0 ]] || { err "Укажите ${what%ей}и: --${RU_PICK_FLAG:-profile} ИМЯ (можно несколько) или --all"; return 1; }
         echo >&2
-        echo "  ${C_BOLD}Для каких профилей?${C_RESET} Профили мостов (белые списки) не выбирайте." >&2
+        echo "  ${C_BOLD}Для каких ${what}?${C_RESET} $hint" >&2
         local i; for i in "${!names[@]}"; do printf '  %s%2d.%s %s\n' "$C_YELLOW" $((i + 1)) "$C_RESET" "${names[i]}" >&2; done
         ask "Номера через пробел или запятую (all — все, Enter — отмена)" ""
         [[ -n "$REPLY" ]] || { info "Отменено"; return 1; }
@@ -176,6 +294,13 @@ _ru_pick_profiles() {   # profiles_jsonl all(0|1) имя_или_номер…  �
 
 node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ|№ …] [--all]
     local act="${1:-status}" ripe="" all=0 ; shift || true
+    # обход живёт в шаблонах подписки, а не в профилях нод
+    case "$act" in
+        bypass|обход) node_ru_bypass on "$@"; return;;
+        bypass-off|unbypass) node_ru_bypass off "$@"; return;;
+        block|direct|off|status|update) ;;
+        *) die "node ru-traffic bypass|block|direct|off|bypass-off|status|update [--ripe|--no-ripe] [--profile ИМЯ … | --all]";;
+    esac
     local -a sel=()
     while (($#)); do
         case "$1" in
@@ -184,7 +309,6 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
             *) die "node ru-traffic block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ … | --all]";;
         esac; shift
     done
-    case "$act" in block|direct|off|status|update) ;; *) die "node ru-traffic block|direct|off|status|update [--ripe|--no-ripe] [--profile ИМЯ … | --all]";; esac
     rw_need_api || return 1
     local profiles; profiles=$(rw_api GET /api/config-profiles | jq -c '.response.configProfiles[]? | {uuid, name}')
     [[ -n "$profiles" ]] || die "В панели нет профилей конфигурации"
@@ -197,6 +321,7 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
             pol=$(ru_policy_of "$cfg")
             printf '  %s%2d.%s %-28s %s%s\n' "$C_YELLOW" "$i" "$C_RESET" "$n" "$(ru_policy_label "${pol%% *}")" "$([[ "$pol" == *ripe* ]] && echo " + сети RIPE")"
         done <<<"$profiles"
+        node_ru_bypass status
         return 0
     fi
     require_root
@@ -234,6 +359,8 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
         fi
     done <<<"$profiles"
     rm -f "$pfx"
+    # update освежает сети RIPE и в обходе (шаблоны подписки)
+    [[ "$act" == update ]] && node_ru_bypass update --all
     audit_write RU_TRAFFIC - - - "$act${ripe:+ ripe=$ripe}: ${done_names[*]:-ничего}"
     return 0
 }

@@ -68,6 +68,18 @@ for pol in block direct; do
         fail "xray: российский трафик — $pol" "$(tail -5 <<<"$res")"
     fi
 done
+# обход в подписке: клиентский конфиг как его соберёт панель (выход сервера первым,
+# дальше direct/block шаблона) — Xray на устройстве должен его принять
+source "$ROOT/lib/balancer.sh"
+DEF_TPL='{"dns":{"servers":["1.1.1.1"]},"routing":{"rules":[{"type":"field","protocol":["bittorrent"],"outboundTag":"direct"}],"domainStrategy":"IPIfNonMatch"},"inbounds":[{"tag":"socks","port":10808,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":true}}],"outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"block","protocol":"blackhole"}]}'
+proxy=$(jq -nc --arg id "$uuid" '{tag:"proxy", protocol:"vless", settings:{vnext:[{address:"203.0.113.10", port:443, users:[{id:$id, encryption:"none", flow:"xtls-rprx-vision"}]}]},
+    streamSettings:{network:"raw", security:"reality", realitySettings:{serverName:"www.example.com", fingerprint:"chrome", publicKey:"nT0eWyNk7hS8DM-FdyJ5b8oA9i4X8kTpo6hZ8aRL2Hk", shortId:"ab"}}}')
+ru_bypass_apply "$DEF_TPL" "$(ru_bypass_rules_json no)" | jq --argjson p "$proxy" '.outbounds = [$p] + .outbounds' > "$WORK/bypass-client.json"
+if res=$(docker run --rm -v "$WORK/bypass-client.json:/c.json:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
+    pass "xray: клиентский конфиг с обходом России (подписка JSON)"
+else
+    fail "xray: клиент с обходом" "$(tail -5 <<<"$res")"
+fi
 # чужой target для Reality
 inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443" | jq --arg id "$uuid" '.settings.clients=[{id:$id, flow:"xtls-rprx-vision"}]')
 profile_config "$inb" > "$WORK/ext.json"
