@@ -168,7 +168,7 @@ EOF
     bans=$(awk -F'\t' -v t="$(now)" '$1!="" && ($2==0 || $2>t)' "$F2D_BANS_DB" 2>/dev/null | wc -l)
     local d="${C_RED}остановлен${C_RESET}"; systemctl is-active --quiet fail2detect 2>/dev/null && d="${C_GREEN}работает${C_RESET}"
     printf '  Роль: %s%s%s · Демон: %s · Баны: %s%s%s\n' "$C_WHITE" "$(server_role)" "$C_RESET" "$d" "$C_RED" "$bans" "$C_RESET"
-    [[ -n "${F2D_NEW_VERSION:-}" ]] && printf '  %s↑ Доступен fail2detect %s — пункт 11 «Обновления»%s\n' "$C_YELLOW" "$F2D_NEW_VERSION" "$C_RESET"
+    [[ -n "${F2D_NEW_VERSION:-}" ]] && printf '  %s↑ Доступен fail2detect %s — пункт 9 «Обновления»%s\n' "$C_YELLOW" "$F2D_NEW_VERSION" "$C_RESET"
     hr 62
 }
 
@@ -284,21 +284,29 @@ menu_node() {
     done
 }
 
-menu_bench() {
-    banner
-    echo "  ${C_BOLD}Бенчмарк сети${C_RESET}"
-    menu_item 1 "Всё: Россия + зарубеж"
-    menu_item 2 "Только Россия"
-    menu_item 3 "Только зарубеж"
-    menu_item 4 "Только пинг (быстро)"
-    menu_item 5 "Cloudflare Speedtest (дашборд)"
-    menu_item 0 "Назад"
-    ask "Выбор" ""
-    case "$REPLY" in
-        1) bench_run;; 2) bench_run ru;; 3) bench_run world;; 4) bench_run --ping;; 5) speedtest_run; return;;
-        *) return;;
-    esac
-    pause
+# GeoCheck, IPQuality, Speedtest и бенчмарк — в одном месте
+menu_tests() {
+    while true; do
+        banner
+        echo "  ${C_BOLD}Тесты${C_RESET}"
+        menu_item 1 "GeoCheck (регион IP в сервисах)"
+        menu_item 2 "IPQuality (репутация IP)"
+        menu_item 3 "Cloudflare Speedtest (дашборд)"
+        echo "  ${C_GRAY}Бенчмарк сети: скорость и пинг до провайдеров${C_RESET}"
+        menu_item 4 "Россия + зарубеж"
+        menu_item 5 "Только Россия"
+        menu_item 6 "Только зарубеж"
+        menu_item 7 "Только пинг (быстро)"
+        menu_item 0 "Назад"
+        ask "Выбор" ""
+        case "$REPLY" in
+            1) geocheck_run;; 2) ipquality_run;; 3) speedtest_run;;
+            4) bench_run;; 5) bench_run ru;; 6) bench_run world;; 7) bench_run --ping;;
+            0|q|"") return;;
+            *) continue;;
+        esac
+        pause
+    done
 }
 
 menu_balancer() {
@@ -351,12 +359,9 @@ menu_main() {
         menu_item 4 "Фаервол и порты"
         menu_item 5 "Jail'ы (правила банов)"
         menu_item 6 "Нода: транспорт, порт, inbound'ы"
-        menu_item 7 "GeoCheck (регион IP в сервисах)"
-        menu_item 8 "IPQuality (репутация IP)"
-        menu_item 9 "Cloudflare Speedtest"
-        menu_item 10 "Установка панели / ноды / подписки"
-        menu_item 11 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
-        menu_item 12 "Бенчмарк сети: Россия и зарубеж (скорость, пинг)"
+        menu_item 7 "Тесты: GeoCheck, IPQuality, Speedtest, бенчмарк"
+        menu_item 8 "Установка панели / ноды / подписки"
+        menu_item 9 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
         menu_item 0 "Выход"
         ask "Выбор" ""
         case "$REPLY" in
@@ -366,12 +371,9 @@ menu_main() {
             4) menu_fw;;
             5) menu_jails;;
             6) menu_node;;
-            7) geocheck_run; pause;;
-            8) ipquality_run; pause;;
-            9) speedtest_run; pause;;
-            10) menu_install;;
-            11) menu_updates;;
-            12) menu_bench;;
+            7) menu_tests;;
+            8) menu_install;;
+            9) menu_updates;;
             0|q) exit 0;;
         esac
     done
