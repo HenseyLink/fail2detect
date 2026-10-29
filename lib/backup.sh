@@ -97,7 +97,7 @@ backup_create() {   # [--out DIR] [--no-certs] [--password P | --no-password] [-
     done
     require_root
     local root; root=$(_bk_root)
-    [[ -f "$root$RW_PANEL_DIR/docker-compose.yml" ]] || die "Панели на этом сервере нет ($RW_PANEL_DIR)"
+    compose_file "$root$RW_PANEL_DIR" >/dev/null || die "Панели на этом сервере нет ($RW_PANEL_DIR)"
     if [[ "$passmode" == ask ]]; then
         if [[ -n "${BACKUP_PASSWORD:-}" ]]; then pass="$BACKUP_PASSWORD"
         elif [[ -z "$auto" && -t 0 ]]; then
@@ -315,7 +315,7 @@ _backup_restore() {   # каталог_распаковки аргументы�
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$RW_DB_CONTAINER" || docker volume inspect remnawave-db-data >/dev/null 2>&1; then
         warn "На этом сервере уже есть база панели — она будет ЗАМЕНЕНА копией."
         if [[ -z "$yes" ]]; then ask "Чтобы продолжить, введите «заменить»" ""; [[ "$REPLY" == заменить ]] || die "Отменено"; fi
-        if [[ -f "$RW_PANEL_DIR/docker-compose.yml" ]]; then
+        if compose_file "$RW_PANEL_DIR" >/dev/null; then
             info "Снимаю копию текущей базы на всякий случай…"
             bk_dump_db "$F2D_BACKUP_DIR/before-restore-$(date +%Y%m%d-%H%M%S).sql.gz" >/dev/null 2>&1 || true
             (cd "$RW_PANEL_DIR" && docker compose down >/dev/null 2>&1)
@@ -355,13 +355,13 @@ _backup_restore() {   # каталог_распаковки аргументы�
     # 4) всё остальное
     info "Запускаю панель…"
     (cd "$RW_PANEL_DIR" && docker compose up -d >/dev/null 2>&1) || { err "docker compose up не удался"; return 1; }
-    [[ -f /opt/subscription/docker-compose.yml ]] && (cd /opt/subscription && docker compose up -d >/dev/null 2>&1)
+    compose_file "$RW_SUB_DIR" >/dev/null && (cd "$RW_SUB_DIR" && docker compose up -d >/dev/null 2>&1)
     panel_wait_api && ok "Панель отвечает" || warn "Панель пока не отвечает на 127.0.0.1:3000 (docker compose logs -f remnawave)"
     web_load
     if [[ -n "$PANEL_DOMAIN$SUB_DOMAIN$SELFSTEAL_DOMAIN" ]] && ! docker ps --format '{{.Names}}' | grep -qx remnawave-nginx; then
         web_apply || warn "nginx не поднялся — проверьте сертификаты: fail2detect cert list"
     fi
-    if [[ -f "$RW_NODE_DIR/docker-compose.yml" ]] && jq -e '.paths | index("/opt/remnanode")' "$m" >/dev/null; then
+    if compose_file "$RW_NODE_DIR" >/dev/null && jq -e '.paths | index("/opt/remnanode")' "$m" >/dev/null; then
         { [[ -n "$yes" ]] || confirm "В копии есть нода этого сервера — запустить её здесь?" y; } && (cd "$RW_NODE_DIR" && docker compose up -d >/dev/null 2>&1) && ok "Нода запущена"
     fi
     config_set RW_API_URL "http://127.0.0.1:3000" >/dev/null

@@ -191,7 +191,7 @@ profile_config() {   # inbound_json или [inbound, …]
 # Добавить в docker-compose ноды монтирование сертификатов (подходит и для
 # compose сторонних установщиков). 0 — файл изменён, 1 — уже было.
 node_compose_add_certs() {
-    local f; f="$(node_dir)/docker-compose.yml"
+    local f; f=$(compose_file "$(node_dir)")
     [[ -f "$f" ]] || return 1
     grep -q "$XRAY_CERT_DIR" "$f" && return 1
     cp -a "$f" "$f.f2d.bak"

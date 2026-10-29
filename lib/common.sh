@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.9.0-beta"
+F2D_VERSION="0.9.1-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
@@ -16,8 +16,11 @@ F2D_NFT_TABLE="fail2detect"
 
 # совместимость с серверами, поставленными сторонним установщиком remnawave-reverse-proxy
 RP_DIR="/usr/local/remnawave_reverse"
+# каталоги по умолчанию; если панель/нода стоят в другом месте, rw_locate найдёт их
+# по контейнерам (или задайте RW_PANEL_DIR / RW_NODE_DIR в конфиге)
 RW_PANEL_DIR="/opt/remnawave"
 RW_NODE_DIR="/opt/remnanode"
+RW_SUB_DIR="/opt/subscription"
 
 # ---------- цвета и вывод ----------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then

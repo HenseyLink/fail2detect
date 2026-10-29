@@ -620,6 +620,31 @@ curl() { return 22; }
 [[ "$(ru_ripe_prefixes 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]] && pass "RIPE недоступен — берётся кэш" || fail "fallback на кэш"
 unset -f curl
 
+section "Где панель и нода"
+DT="$WORK/detect"; mkdir -p "$DT/opt/remnawave" "$DT/root/rw" "$DT/opt/remnanode" "$DT/empty"
+det() {   # «как видит сервер»: настоящие has_*/rw_locate из detect.sh, docker — заглушка с контейнерами из $CT
+    ( source "$ROOT/lib/detect.sh"
+      docker() { [[ "$1" == ps ]] && printf '%b' "${CT:-}"; }
+      _RW_CT_DONE=""; RW_PANEL_DIR="$DT/opt/remnawave"; RW_NODE_DIR="$DT/opt/remnanode"; RW_SUB_DIR="$DT/empty"
+      rw_locate; echo "$(server_role)|${RW_PANEL_DIR#"$DT"}|${RW_NODE_DIR#"$DT"}" )
+}
+printf 'services:\n  remnawave:\n    image: remnawave/backend:2\n' > "$DT/opt/remnawave/compose.yaml"
+[[ "$(det)" == "панель|/opt/remnawave|/opt/remnanode" ]] && pass "compose.yaml (не docker-compose.yml)" || fail "compose.yaml" "$(det)"
+rm "$DT/opt/remnawave/compose.yaml"; printf 'services:\n  backend:\n    image: "remnawave/backend:latest"\n' > "$DT/opt/remnawave/docker-compose.yml"
+[[ "$(det)" == "панель|/opt/remnawave|/opt/remnanode" ]] && pass "сервис переименован — панель найдена по образу" || fail "по образу" "$(det)"
+rm "$DT/opt/remnawave/docker-compose.yml"
+printf 'services:\n  remnawave:\n    image: remnawave/backend:2\n  remnanode:\n    image: remnawave/node:latest\n' > "$DT/root/rw/docker-compose.yml"
+CT="remnawave\tremnawave/backend:2\t$DT/root/rw\trunning\nremnanode\tremnawave/node:latest\t$DT/root/rw\trunning\n"
+[[ "$(det)" == "панель+нода|/root/rw|/opt/remnanode" ]] && pass "панель не в /opt/remnawave — каталог найден по контейнеру" || fail "rw_locate" "$(det)"
+CT=""; cp "$ROOT/tests/fixtures/compose-caddy.yml" "$DT/opt/remnanode/docker-compose.yml"
+[[ "$(det)" == "нода|/opt/remnawave|/opt/remnanode" ]] && pass "нода из compose стороннего установщика" || fail "нода eGames" "$(det)"
+rm "$DT/opt/remnanode/docker-compose.yml"; CT="remnawave\tremnawave/backend:2\t\texited\n"
+[[ "$(det)" == "панель|/opt/remnawave|/opt/remnanode" ]] && pass "только контейнер (compose не найден) — панель всё равно видна" || fail "контейнер без compose" "$(det)"
+CT=""; [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "пустой сервер — «не найдено»" || fail "пустой" "$(det)"
+printf 'services:\n  nginx:\n    image: nginx\n' > "$DT/opt/remnawave/docker-compose.yml"
+[[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "чужой compose в каталоге — не панель" || fail "чужой compose" "$(det)"
+unset CT
+
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
 [[ "$("$ROOT/fail2detect" version)" == "fail2detect $F2D_VERSION" ]] && pass "fail2detect version" || fail "fail2detect version"

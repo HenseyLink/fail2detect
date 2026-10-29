@@ -474,8 +474,9 @@ node_api_port_change() {   # new_port
     [[ -n "$panels" ]] || warn "IP панели не найден — укажите его: fail2detect config PANEL_IPS <ip>"
     confirm "Нода перезапустится (клиенты отключатся на ~10 c). Продолжить?" y || return 1
 
-    cp -a "$d/docker-compose.yml" "$d/docker-compose.yml.f2d.bak"
-    sed -i -E "s/(NODE_PORT|APP_PORT)([=:][[:space:]]*\"?)$old/\1\2$new/" "$d/docker-compose.yml"
+    local cf; cf=$(compose_file "$d")
+    cp -a "$cf" "$cf.f2d.bak"
+    sed -i -E "s/(NODE_PORT|APP_PORT)([=:][[:space:]]*\"?)$old/\1\2$new/" "$cf"
     [[ -f "$d/.env" ]] && sed -i -E "s/^(NODE_PORT|APP_PORT)=$old$/\1=$new/" "$d/.env"
     config_set NODE_API_PORT "$new"
 

@@ -62,7 +62,7 @@ rw_components() {
     has_panel && printf 'panel\t%s\tremnawave\tremnawave/backend\n' "$RW_PANEL_DIR"
     local nd; nd=$(node_dir)
     [[ -n "$nd" ]] && printf 'node\t%s\tremnanode\tremnawave/node\n' "$nd"
-    if [[ -f "$RW_SUB_DIR/docker-compose.yml" ]]; then
+    if compose_file "$RW_SUB_DIR" >/dev/null; then
         printf 'sub\t%s\tremnawave-subscription-page\tremnawave/subscription-page\n' "$RW_SUB_DIR"
     elif compose_has_service "$RW_PANEL_DIR" remnawave-subscription-page; then
         printf 'sub\t%s\tremnawave-subscription-page\tremnawave/subscription-page\n' "$RW_PANEL_DIR"
@@ -78,7 +78,7 @@ rw_service_image() {   # dir service
     local img
     img=$( (cd "$1" && docker compose config --format json 2>/dev/null) | jq -r --arg s "$2" '.services[$s].image // empty' 2>/dev/null)
     # старый docker compose без --format json — читаем файл
-    [[ -n "$img" ]] || img=$(compose_service_image "$1/docker-compose.yml" "$2")
+    [[ -n "$img" ]] || img=$(compose_service_image "$(compose_file "$1")" "$2")
     echo "$img"
 }
 
@@ -162,7 +162,7 @@ rw_unpin_image() {   # dir service image repo
     [[ -n "$latest" ]] && version_gt "$latest" "${tag#v}" || return 0
     warn "Образ закреплён на версии $tag, последний релиз — $latest"
     confirm "Переключить на $latest?" y || return 0
-    local f="$1/docker-compose.yml"
+    local f; f=$(compose_file "$1")
     cp -p "$f" "$f.f2d-bak"
     local tmp; tmp=$(mktemp)
     sed "s|image:[[:space:]]*${3//./\\.}[[:space:]]*\$|image: ${3%:*}:${latest}|" "$f" > "$tmp" && cat "$tmp" > "$f"; rm -f "$tmp"

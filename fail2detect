@@ -16,6 +16,7 @@ done
 unset _m
 
 load_config
+rw_locate
 
 # короткая команда f2d: создаём сами, если её нет (установщик мог быть
 # взят из кэша GitHub до её появления). Чужой f2d не трогаем.
@@ -86,6 +87,7 @@ ${C_BOLD}Сертификаты${C_RESET}
   cert issue <домен>        выпустить или найти сертификат для домена
 
 ${C_BOLD}Резервные копии и перенос панели${C_RESET}
+  detect                    что найдено на сервере (панель, нода, подписка, контейнеры, демон)
   backup create [--no-certs] [--password P | --no-password]
                             копия панели: база, секреты, подписка, нода, сертификаты (.tar / .tar.enc)
   backup list | info <копия>
@@ -495,6 +497,7 @@ main() {
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
         bench|benchmark) bench_run "$@";;
+        detect|whoami) rw_detect_report;;
         backup|backups) backup_cli "$@";;
         migrate) panel_migrate "$@";;
         panel)      case "${1:-}" in

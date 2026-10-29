@@ -1,16 +1,56 @@
 #!/usr/bin/env bash
 # fail2detect — автоопределение окружения (Remnawave, порты, панель).
 
-compose_has_service() { [[ -f "$1/docker-compose.yml" ]] && grep -qE "^[[:space:]]*$2:" "$1/docker-compose.yml"; }
+# compose-файл каталога: у установщиков и версий docker compose имена разные
+compose_file() {   # каталог → путь (если файла нет — docker-compose.yml)
+    local f
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        [[ -f "$1/$f" ]] && { echo "$1/$f"; return 0; }
+    done
+    echo "$1/docker-compose.yml"; return 1
+}
 
-has_panel()  { compose_has_service "$RW_PANEL_DIR" remnawave; }
-has_node()   { compose_has_service "$RW_NODE_DIR" remnanode || compose_has_service "$RW_PANEL_DIR" remnanode; }
-has_sub_page() { [[ -f /opt/subscription/docker-compose.yml ]] || compose_has_service "$RW_PANEL_DIR" remnawave-subscription-page; }
+# сервис есть в compose: по имени или по образу (имя сервиса установщики меняют)
+compose_has_service() {   # каталог сервис [шаблон_образа]
+    local f; f=$(compose_file "$1") || return 1
+    grep -qE "^[[:space:]]*$2:" "$f" && return 0
+    [[ -n "${3:-}" ]] && grep -qE "^[[:space:]]*image:[[:space:]]*[\"']?([^/]+/)?$3([:@\"' ]|$)" "$f"
+}
+
+# контейнеры Remnawave: имя<TAB>образ<TAB>каталог compose<TAB>состояние (кэш на запуск)
+_rw_containers() {
+    if [[ -z "${_RW_CT_DONE:-}" ]]; then
+        _RW_CT=$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.State}}' 2>/dev/null | grep -E $'\tremnawave/' || true)
+        _RW_CT_DONE=1
+    fi
+    [[ -n "$_RW_CT" ]] && printf '%s\n' "$_RW_CT"
+}
+_rw_ct_dir() { _rw_containers | awk -F'\t' -v i="$1" '$2 ~ "^remnawave/" i "(:|@|$)" && $3 != "" {print $3; exit}'; }
+_rw_ct_has() { _rw_containers | awk -F'\t' -v i="$1" '$2 ~ "^remnawave/" i "(:|@|$)" {f = 1} END {exit !f}'; }
+
+# найти каталоги панели/ноды/подписки, если они не там, где ждём
+rw_locate() {
+    local d
+    if ! compose_has_service "$RW_PANEL_DIR" remnawave 'remnawave/backend'; then
+        d=$(_rw_ct_dir backend); [[ -n "$d" ]] && compose_has_service "$d" remnawave 'remnawave/backend' && RW_PANEL_DIR="$d"
+    fi
+    if ! compose_has_service "$RW_NODE_DIR" remnanode 'remnawave/node' && ! compose_has_service "$RW_PANEL_DIR" remnanode 'remnawave/node'; then
+        d=$(_rw_ct_dir node); [[ -n "$d" && "$d" != "$RW_PANEL_DIR" ]] && compose_has_service "$d" remnanode 'remnawave/node' && RW_NODE_DIR="$d"
+    fi
+    if [[ ! -f "$(compose_file "$RW_SUB_DIR")" ]]; then
+        d=$(_rw_ct_dir subscription-page); [[ -n "$d" && "$d" != "$RW_PANEL_DIR" ]] && RW_SUB_DIR="$d"
+    fi
+    return 0
+}
+
+has_panel()  { compose_has_service "$RW_PANEL_DIR" remnawave 'remnawave/backend' || _rw_ct_has backend; }
+has_node()   { compose_has_service "$RW_NODE_DIR" remnanode 'remnawave/node' || compose_has_service "$RW_PANEL_DIR" remnanode 'remnawave/node' || _rw_ct_has node; }
+has_sub_page() { compose_file "$RW_SUB_DIR" >/dev/null || compose_has_service "$RW_PANEL_DIR" remnawave-subscription-page 'remnawave/subscription-page' || _rw_ct_has subscription-page; }
 
 # каталог, где лежит compose с remnanode
 node_dir() {
-    if compose_has_service "$RW_NODE_DIR" remnanode; then echo "$RW_NODE_DIR"
-    elif compose_has_service "$RW_PANEL_DIR" remnanode; then echo "$RW_PANEL_DIR"; fi
+    if compose_has_service "$RW_NODE_DIR" remnanode 'remnawave/node'; then echo "$RW_NODE_DIR"
+    elif compose_has_service "$RW_PANEL_DIR" remnanode 'remnawave/node'; then echo "$RW_PANEL_DIR"; fi
 }
 
 server_role() {
@@ -21,12 +61,53 @@ server_role() {
     ((${#r[@]})) && (IFS=+; echo "${r[*]}") || echo "не найдено"
 }
 
+# что и где найдено — для разбора «роль: не найдено»
+rw_detect_report() {
+    title "Что fail2detect видит на сервере"
+    local name dir svc img f
+    for name in "Панель|$RW_PANEL_DIR|remnawave|backend" "Нода|$RW_NODE_DIR|remnanode|node" "Подписка|$RW_SUB_DIR|remnawave-subscription-page|subscription-page"; do
+        IFS='|' read -r name dir svc img <<<"$name"
+        f=$(compose_file "$dir") || f=""
+        if [[ -n "$f" ]] && compose_has_service "$dir" "$svc" "remnawave/$img"; then
+            ok "$name: $f (сервис $svc / образ remnawave/$img)"
+        elif [[ -n "$f" ]]; then
+            warn "$name: в $f нет сервиса $svc и образа remnawave/$img"
+        else
+            info "$name: в $dir compose-файла нет"
+        fi
+    done
+    echo
+    if have docker; then
+        local ct; ct=$(_rw_containers)
+        if [[ -n "$ct" ]]; then
+            echo "  ${C_BOLD}Контейнеры Remnawave${C_RESET}"
+            local n i w st
+            while IFS=$'\t' read -r n i w st; do printf '    %-28s %-36s %-9s %s\n' "$n" "$i" "$st" "${w:-—}"; done <<<"$ct"
+        else
+            warn "Контейнеров с образами remnawave/* нет (docker ps -a)"
+        fi
+    else
+        warn "Docker не установлен"
+    fi
+    echo
+    echo "  Роль: $(server_role)"
+    echo
+    if systemctl is-active --quiet fail2detect 2>/dev/null; then ok "Демон fail2detect работает"
+    else
+        warn "Демон fail2detect остановлен ($(systemctl is-enabled fail2detect 2>/dev/null || echo "не установлен"))"
+        journalctl -u fail2detect -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
+        echo "    Запустить: systemctl enable --now fail2detect   (или fail2detect setup)"
+    fi
+    echo
+    echo "  Каталог не тот? Задайте явно: fail2detect config RW_PANEL_DIR /путь  (или RW_NODE_DIR)"
+}
+
 # NODE_PORT (API ноды, по умолчанию 2222); старые версии — APP_PORT
 detect_node_api_port() {
     [[ -n "$NODE_API_PORT" ]] && { echo "$NODE_API_PORT"; return; }
     local d; d=$(node_dir); [[ -n "$d" ]] || return 1
     local p
-    p=$(grep -oE '(NODE_PORT|APP_PORT)[=:][[:space:]]*"?[0-9]+' "$d/docker-compose.yml" "$d/.env" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    p=$(grep -oE '(NODE_PORT|APP_PORT)[=:][[:space:]]*"?[0-9]+' "$(compose_file "$d")" "$d/.env" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
     echo "${p:-2222}"
 }
 

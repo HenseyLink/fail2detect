@@ -10,7 +10,6 @@
 
 RW_RAW_BACKEND="https://raw.githubusercontent.com/remnawave/backend/refs/heads/main"
 RW_RAW_SUBPAGE="https://raw.githubusercontent.com/remnawave/subscription-page/refs/heads/main"
-RW_SUB_DIR="/opt/subscription"
 
 require_docker() {
     if have docker && docker compose version >/dev/null 2>&1; then return 0; fi

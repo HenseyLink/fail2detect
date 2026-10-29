@@ -36,14 +36,14 @@ remove_node() {   # [--reinstall]
     require_root; load_config
     local reinstall=no; [[ "${1:-}" == --reinstall ]] && reinstall=yes
     local d; d=$(node_dir)
-    [[ -z "$d" && -f "$RW_NODE_DIR/docker-compose.yml" ]] && d="$RW_NODE_DIR"
+    [[ -z "$d" ]] && compose_file "$RW_NODE_DIR" >/dev/null && d="$RW_NODE_DIR"
     [[ -n "$d" ]] || { info "Ноды на этом сервере нет"; return 0; }
     if [[ "$d" == "$RW_PANEL_DIR" ]]; then
         die "Нода в одном docker-compose с панелью ($d). Удалите её из compose вручную или удалите панель целиком: fail2detect remove panel"
     fi
 
     # что ещё живёт в этом compose (например, сайт-заглушка установщика)
-    local others; others=$(awk '/^services:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^ +[A-Za-z0-9_-]+:[ \t]*$/{gsub(/[ :]/,""); print}' "$d/docker-compose.yml" | grep -vx remnanode | xargs)
+    local others; others=$(awk '/^services:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^ +[A-Za-z0-9_-]+:[ \t]*$/{gsub(/[ :]/,""); print}' "$(compose_file "$d")" | grep -vx remnanode | xargs)
     local xp=(); read -ra xp <<<"$NODE_XRAY_PORTS"
     local ports; ports=$( { ((${#xp[@]})) && printf '%s\n' "${xp[@]}"
         for p in $(detect_xray_ports); do echo "$p/tcp"; done
@@ -133,7 +133,7 @@ reinstall_node() {
 # ---------- панель ----------
 remove_panel() {   # [--reinstall]
     require_root; load_config
-    has_panel || [[ -f "$RW_PANEL_DIR/docker-compose.yml" ]] || { info "Панели на этом сервере нет"; return 0; }
+    has_panel || compose_file "$RW_PANEL_DIR" >/dev/null || { info "Панели на этом сервере нет"; return 0; }
     title "Удаление панели Remnawave"
     echo "  Каталоги:  $RW_PANEL_DIR$([[ -d $RW_SUB_DIR ]] && echo " и $RW_SUB_DIR") (будут сохранены в архив)"
     echo "  База:      дамп в $F2D_BACKUP_DIR; удалять ли сам том с базой — спрошу отдельно"
