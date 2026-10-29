@@ -78,6 +78,8 @@ if [[ "$MODE" == --update ]]; then
 fi
 
 green "fail2detect установлен: /usr/local/bin/fail2detect (коротко: f2d)"
+# установка по SSH при переносе панели: без мастера, он нужен уже после восстановления
+[[ "$MODE" == --no-setup ]] && exit 0
 echo
 if [[ -t 0 ]] || [[ -e /dev/tty ]]; then
     read -r -p "Запустить мастер настройки сейчас? [Y/n]: " a </dev/tty || a=y

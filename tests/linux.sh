@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs site web remnawave balancer installer remove setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web remnawave balancer installer remove backup setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -516,6 +516,75 @@ grep -q 'try_files $uri $uri/ =404;' <<<"$conf" && grep -q 'error_page 404 /404.
 grep -q 'listen 80;' <<<"$conf" && grep -q 'acme-challenge' <<<"$conf" && grep -q 'return 301 https://$host$request_uri;' <<<"$conf" && pass "nginx: HTTP 80 — ACME и переход на HTTPS" || fail "HTTP 80 в конфиге"
 web_set WEB_HTTP ""; grep -q 'listen 80' <<<"$(web_render)" && fail "HTTP 80 без WEB_HTTP" || pass "без WEB_HTTP порт 80 не слушается"
 unset -f cert_dir; source "$ROOT/lib/certs.sh"
+
+section "Резервные копии панели"
+BR="$WORK/bkroot"; mkdir -p "$BR/opt/remnawave" "$BR/opt/subscription" "$BR/etc/fail2detect/jail.d" "$BR/etc/letsencrypt/live/p.example"
+printf 'PANEL_DOMAIN=p.example\nSUB_PUBLIC_DOMAIN=s.example\nPOSTGRES_USER=rwuser\nAPP_SECRET=abc\n' > "$BR/opt/remnawave/.env"
+echo 'services: {}' > "$BR/opt/remnawave/docker-compose.yml"
+echo 'APP_PORT=3010' > "$BR/opt/subscription/.env"
+printf 'RW_API_TOKEN="tok123"\nTG_BOT_TOKEN="bot1"\nSSH_PORTS="2222"\nPANEL_IPS="1.1.1.1"\n' > "$BR/etc/fail2detect/fail2detect.conf"
+echo 'PANEL_DOMAIN="p.example"' > "$BR/etc/fail2detect/web.env"
+echo cert > "$BR/etc/letsencrypt/live/p.example/fullchain.pem"
+DOCKER_LOG="$WORK/docker-bk.log"; : > "$DOCKER_LOG"
+docker() {
+    echo "$*" >> "$DOCKER_LOG"
+    case "$1" in
+        ps) echo remnawave-db;;
+        exec) case "$*" in
+                *pg_dumpall*) printf -- '--\n-- PostgreSQL database cluster dump\n--\nCREATE TABLE users (id int);\n';;
+                *"count(*) from users"*) echo 42;; *"count(*) from nodes"*) echo 3;; *"count(*) from hosts"*) echo 7;; *) return 1;;
+              esac;;
+        inspect) echo remnawave/backend:2;;
+    esac
+}
+curl() { return 1; }
+require_root() { :; }
+F2D_BACKUP_ROOT="$BR"; F2D_BACKUP_PATHS="/opt/remnawave /opt/subscription /opt/remnanode /etc/fail2detect"; BKOUT="$WORK/bkout"
+backup_create --out "$BKOUT" --no-password --quiet
+f="$BACKUP_LAST"
+[[ -f "$f" && "$f" == */panel-*.tar ]] && pass "копия создана: $(basename "$f")" || fail "backup_create" "$f"
+grep -q 'pg_dumpall -U rwuser --clean --if-exists' "$DOCKER_LOG" && pass "дамп от пользователя БД из .env панели" || fail "пользователь БД" "$(cat "$DOCKER_LOG")"
+[[ "$(tar -tf "$f" | sort | tr '\n' ' ')" == "db.sql.gz files.tar.gz manifest.json " ]] && pass "состав: manifest, db.sql.gz, files.tar.gz" || fail "состав копии" "$(tar -tf "$f")"
+m=$(tar -xOf "$f" manifest.json)
+jq -e '.format == 1 and .panel_domain == "p.example" and .sub_domain == "s.example" and .counts == "users=42 nodes=3 hosts=7"
+    and .paths == ["/opt/remnawave", "/opt/subscription", "/etc/fail2detect", "/etc/letsencrypt"]' >/dev/null <<<"$m" \
+    && pass "опись: домены, число пользователей/нод/хостов, пути (без отсутствующих)" || fail "manifest" "$m"
+tar -xOf "$f" files.tar.gz | tar -tz | grep -q '^opt/remnawave/.env$' && pass "в копии .env панели (секреты)" || fail ".env в копии"
+# шифрование
+backup_create --out "$BKOUT" --password 'Secret-pass-1' --quiet; fe="$BACKUP_LAST"
+[[ "$fe" == *.tar.enc ]] && ! tar -tf "$fe" >/dev/null 2>&1 && pass "с паролем — .tar.enc, без пароля не читается" || fail "шифрование"
+ST="$WORK/unp"; mkdir -p "$ST"; F2D_BACKUP_PASS='Secret-pass-1' _bk_unpack "$fe" "$ST" && [[ -s "$ST/db.sql.gz" ]] && pass "расшифровка верным паролем" || fail "расшифровка"
+rm -rf "$ST"; mkdir -p "$ST"; F2D_BACKUP_PASS='wrong-password' _bk_unpack "$fe" "$ST" 2>/dev/null && fail "неверный пароль принят" || pass "неверный пароль — отказ"
+# чистка
+F2D_BACKUP_DIR="$WORK/prune"; mkdir -p "$F2D_BACKUP_DIR"
+for d in 20260101 20260102 20260103 20260104; do touch "$F2D_BACKUP_DIR/panel-h-$d-000000.tar"; done
+backup_prune 2
+left=$(cd "$F2D_BACKUP_DIR" && printf '%s ' panel-*)
+[[ "$left" == "panel-h-20260103-000000.tar panel-h-20260104-000000.tar " ]] && pass "оставлены 2 последние копии" || fail "backup_prune" "$left"
+# перенос настроек fail2detect: панельные ключи — да, фаервол/SSH — нет
+SAVED_CONF_DIR="$F2D_CONF_DIR"; F2D_CONF_DIR="$WORK/newetc"; F2D_CONF="$F2D_CONF_DIR/fail2detect.conf"; mkdir -p "$F2D_CONF_DIR"
+printf 'SSH_PORTS="22"\n' > "$F2D_CONF"
+_bk_restore_conf "$BR/etc/fail2detect"
+grep -q '^RW_API_TOKEN="tok123"' "$F2D_CONF" && grep -q '^TG_BOT_TOKEN="bot1"' "$F2D_CONF" && grep -q '^SSH_PORTS="22"' "$F2D_CONF" && ! grep -q PANEL_IPS "$F2D_CONF" && [[ -f "$F2D_CONF_DIR/web.env" ]] \
+    && pass "настройки: токены и web.env перенесены, SSH и фаервол нового сервера не тронуты" || fail "_bk_restore_conf" "$(cat "$F2D_CONF")"
+F2D_CONF_DIR="$SAVED_CONF_DIR"; F2D_CONF="$F2D_CONF_DIR/fail2detect.conf"; load_config
+# нода: новый IP панели
+UFW_LOG="$WORK/ufw.log"; : > "$UFW_LOG"
+ufw_active() { true; }; ufw() { echo "ufw $*" >> "$UFW_LOG"; }; fw_apply() { :; }; has_node() { true; }
+PANEL_IPS="1.1.1.1 9.9.9.9"; NODE_API_PORT=2222
+node_panel_ip 5.5.5.5 --replace 1.1.1.1 >/dev/null
+[[ "$PANEL_IPS" == "9.9.9.9 5.5.5.5" ]] && grep -q 'delete allow proto tcp from 1.1.1.1 to any port 2222' "$UFW_LOG" && grep -q 'allow proto tcp from 5.5.5.5 to any port 2222' "$UFW_LOG" \
+    && pass "нода: IP панели заменён, правило UFW к API ноды обновлено" || fail "node_panel_ip" "$PANEL_IPS | $(cat "$UFW_LOG")"
+node_panel_ip 6.6.6.6 >/dev/null; [[ "$PANEL_IPS" == 6.6.6.6 ]] && pass "без --replace — только новый IP" || fail "node_panel_ip замена всех"
+config_set PANEL_IPS "198.51.100.200 2001:db8:abcd::1" >/dev/null
+unset -f docker curl require_root ufw_active ufw fw_apply has_node
+unset F2D_BACKUP_ROOT F2D_BACKUP_PATHS
+F2D_BACKUP_DIR="${F2D_STATE_DIR}/backup"
+# shellcheck source=/dev/null
+for m in firewall detect; do source "$ROOT/lib/$m.sh"; done
+eval "$stubs_save" 2>/dev/null; has_node()  { [[ "$STUB_NODE" == yes ]]; }; fw_mode() { echo "$STUB_MODE"; }; ufw_active() { false; }; wan_iface() { echo eth0; }
+detect_ssh_ports() { echo 2233; }; detect_xray_ports() { echo 443; }; detect_node_api_port() { echo 2222; }; detect_panel_ips() { echo "198.51.100.200 2001:db8:abcd::1"; }
+has_panel() { [[ "$STUB_PANEL" == yes ]]; }; has_sub_page() { false; }
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

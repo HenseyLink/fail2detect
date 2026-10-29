@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs site web remnawave balancer installer remove setup ipquality geocheck speedtest bench censorcheck update; do
+for _m in common detect firewall jail transport certs site web remnawave balancer installer remove backup setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -83,6 +83,16 @@ ${C_BOLD}Сертификаты${C_RESET}
   cert list                 найденные сертификаты (certbot и Caddy) и способ выпуска
   cert method               выбрать способ выпуска заново (HTTP-01 / Cloudflare DNS)
   cert issue <домен>        выпустить или найти сертификат для домена
+
+${C_BOLD}Резервные копии и перенос панели${C_RESET}
+  backup create [--no-certs] [--password P | --no-password]
+                            копия панели: база, секреты, подписка, нода, сертификаты (.tar / .tar.enc)
+  backup list | info <копия>
+  backup send <копия> --telegram | --to root@сервер   сохранить копию вне сервера
+  backup restore <копия> [--panel-domain D] [--sub-domain D]   восстановить на этом сервере
+  backup schedule daily|weekly|off [--keep N] [--telegram]     автокопии по таймеру
+  panel migrate --to root@<новый сервер>   перенести панель целиком (копия → SSH → восстановление)
+  node panel-ip <IP> [--replace <старый>]  на ноде: пустить новую панель после переноса
 
 ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
@@ -369,6 +379,7 @@ menu_main() {
         menu_item 7 "Тесты: GeoCheck, IPQuality, Speedtest, CensorCheck, бенчмарк"
         menu_item 8 "Установка панели / ноды / подписки"
         menu_item 9 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
+        menu_item 10 "Резервные копии и перенос панели"
         menu_item 0 "Выход"
         ask "Выбор" ""
         case "$REPLY" in
@@ -381,6 +392,7 @@ menu_main() {
             7) menu_tests;;
             8) menu_install;;
             9) menu_updates;;
+            10) menu_backup;;
             0|q) exit 0;;
         esac
     done
@@ -458,16 +470,25 @@ main() {
                         add) node_add "${2:-}";;
                         transport) node_transport_change "${2:-}";;
                         add-transport) node_transport_add "${2:-}";;
+                        panel-ip) shift; node_panel_ip "$@";;
                         prepare) shift; node_prepare_cli "$@";;
                         inbound-json) node_inbound_json "${2:-}" "${3:-443}" "${4:-}" "${5:-}";;
                         port) node_port_change "${2:?порт}" "${3:-}";;
                         api-port) node_api_port_change "${2:?порт}";;
                         inbounds) rw_show_inbounds;;
                         logs) node_logs_enable;;
-                        *) die "node add|transport|add-transport|port|prepare|inbound-json|api-port|inbounds|logs";;
+                        *) die "node add|transport|add-transport|panel-ip|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
         bench|benchmark) bench_run "$@";;
+        backup|backups) backup_cli "$@";;
+        migrate) panel_migrate "$@";;
+        panel)      case "${1:-}" in
+                        migrate) shift; panel_migrate "$@";;
+                        backup) shift; backup_create "$@";;
+                        restore) shift; backup_restore "$@";;
+                        *) die "panel migrate --to root@сервер | panel backup | panel restore <копия>";;
+                    esac;;
         censor|censorcheck|dpi) censorcheck_run "$@";;
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;
