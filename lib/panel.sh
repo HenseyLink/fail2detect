@@ -48,37 +48,82 @@ panel_docker_gateway() {
 _is_private_ip() { [[ "$1" =~ ^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.) ]]; }
 
 # Нода на этом же сервере записана в панели адресом шлюза docker-сети. После переноса
-# шлюз может быть другим, а правила UFW «сеть docker → API ноды» не переезжают —
-# панель не достучится до ноды, Xray не получит конфиг, и 443 (Reality) не поднимется.
+# шлюз может быть другим, правила UFW «сеть docker → API ноды» не переезжают, нода
+# может быть выключена в панели — тогда панель не отдаёт ноде конфиг, Xray не
+# стартует, 443 (Reality) не поднимается и панель не открывается.
+# Шаг за шагом: адрес, порт, фаервол, связь из контейнера панели, переподключение.
 panel_fix_local_node() {
-    has_node || return 0
-    local gw sub napi nodes u name addr port fixed=0
-    gw=$(panel_docker_gateway); [[ -n "$gw" ]] || return 0
-    napi="${NODE_API_PORT:-$(detect_node_api_port)}"
-    sub=$(docker inspect remnawave -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}/{{$v.IPPrefixLen}}{{"\n"}}{{end}}' 2>/dev/null | awk 'NF {print; exit}')
-    # API ноды — из docker-сети панели
-    if ufw_active && [[ -n "$sub" ]]; then
-        local net; net=$(docker network inspect "$(docker inspect remnawave -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null)" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
-        [[ -n "$net" ]] && ufw_allow "$napi" tcp "$net" "Remnawave panel (docker)" && ok "UFW: API ноды ($napi) открыт для docker-сети панели $net"
-    fi
-    nodes=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r '.response[]? | [.uuid, .name, .address, (.port // 0 | tostring)] | @tsv' 2>/dev/null) || return 0
-    while IFS=$'\t' read -r u name addr port; do
-        [[ -n "$u" ]] || continue
-        _is_private_ip "$addr" || continue
-        [[ "$port" == "$napi" || "$port" == 0 ]] || continue
-        if [[ "$addr" != "$gw" ]]; then
-            local r; r=$(rw_api PATCH /api/nodes "$(jq -nc --arg u "$u" --arg a "$gw" '{uuid: $u, address: $a}')" 2>/dev/null)
-            if jq -e '.response.uuid' >/dev/null 2>&1 <<<"$r"; then ok "Нода «${name}»: адрес $addr → $gw (шлюз docker на этом сервере)"; fixed=1
-            else warn "Нода «${name}»: адрес $addr не обновлён ($(jq -c '.message // .' <<<"$r" 2>/dev/null))"; fi
+    if ! has_node; then info "Ноды на этом сервере нет — чинить нечего"; return 0; fi
+    local gw net nodes u name addr port dis
+    gw=$(panel_docker_gateway)
+    net=$(docker network inspect "$(docker inspect remnawave -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null | head -1)" \
+        -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
+    nodes=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r '.response[]? | [.uuid, .name, .address, ((.port // 0) | tostring), (.isDisabled | tostring)] | @tsv' 2>/dev/null)
+    if [[ -z "$nodes" ]]; then err "Не получил список нод из API панели (токен: fail2detect setup или config RW_API_TOKEN)"; return 1; fi
+    local found=0
+    while IFS=$'\t' read -r u name addr port dis; do
+        [[ -n "$u" ]] && _is_private_ip "$addr" || continue
+        found=1
+        [[ "$port" == 0 ]] && port="${NODE_API_PORT:-$(detect_node_api_port 2>/dev/null || echo 2222)}"
+        title "Нода «${name}» на этом сервере ($addr:$port)"
+        # 1) выключена в панели
+        if [[ "$dis" == true ]]; then
+            rw_api POST "/api/nodes/$u/actions/enable" >/dev/null 2>&1 && ok "Была выключена в панели — включил" || warn "Нода выключена в панели, включить не вышло"
         fi
-        # дождаться, пока панель подключится и раздаст конфиг
-        local i st=""
+        # 2) адрес = шлюз docker-сети панели
+        if [[ -n "$gw" && "$addr" != "$gw" ]]; then
+            local r; r=$(rw_api PATCH /api/nodes "$(jq -nc --arg u "$u" --arg a "$gw" '{uuid: $u, address: $a}')" 2>/dev/null)
+            if jq -e '.response.uuid' >/dev/null 2>&1 <<<"$r"; then ok "Адрес $addr → $gw (шлюз docker-сети панели здесь)"; addr="$gw"
+            else warn "Адрес $addr не обновлён ($(jq -c '.message // .' <<<"$r" 2>/dev/null))"; fi
+        else
+            ok "Адрес верный: $addr — шлюз docker-сети панели${net:+ ($net)}"
+        fi
+        # 3) нода слушает свой API
+        if ss -H -tln "( sport = :$port )" 2>/dev/null | grep -q .; then
+            ok "Нода слушает API на порту $port"
+        else
+            err "Порт $port никто не слушает — нода не запустила свой API"
+            local nc; nc=$(_rw_containers | awk -F'\t' '$2 ~ /^remnawave\/node/ {print $1; exit}')
+            [[ -n "$nc" ]] && { echo "    Последние строки docker logs $nc:"; docker logs --tail 12 "$nc" 2>&1 | sed 's/^/      /'; }
+            echo "    Частая причина — SECRET_KEY ноды не от этой панели (нода → «Скопировать ключ» в панели → .env ноды)."
+        fi
+        # 4) фаервол: docker-сеть панели → API ноды
+        if ufw_active; then
+            if [[ -n "$net" ]]; then
+                ufw_allow "$port" tcp "$net" "Remnawave panel (docker)"
+                ok "UFW: разрешил $net → порт $port"
+            fi
+        else
+            info "UFW выключен — не мешает"
+        fi
+        if nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1; then
+            fw_apply >/dev/null 2>&1 && ok "Фаервол fail2detect: API ноды открыт для docker-сетей (не с внешнего интерфейса)"
+        fi
+        # 5) связь из контейнера панели (как ходит сама панель)
+        local js="const s=require('net').connect($port,'$addr');s.setTimeout(4000);s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(2))"
+        if docker exec remnawave node -e "$js" >/dev/null 2>&1; then
+            ok "Контейнер панели достаёт до $addr:$port"
+        else
+            err "Контейнер панели НЕ достаёт до $addr:$port — режет фаервол на сервере"
+            echo "    Проверьте: iptables -S INPUT | head; ufw status; nft list ruleset | grep -n $port"
+        fi
+        # 6) переподключить и дождаться
+        rw_api POST "/api/nodes/$u/actions/restart" >/dev/null 2>&1 && info "Попросил панель переподключить ноду…"
+        local i st="" msg=""
         for i in $(seq 1 20); do
-            st=$(rw_api GET "/api/nodes/$u" 2>/dev/null | jq -r '.response.isConnected // empty' 2>/dev/null)
+            local nj; nj=$(rw_api GET "/api/nodes/$u" 2>/dev/null)
+            st=$(jq -r '.response.isConnected // empty' <<<"$nj" 2>/dev/null); msg=$(jq -r '.response.lastStatusMessage // empty' <<<"$nj" 2>/dev/null)
             [[ "$st" == true ]] && break; sleep 3
         done
-        [[ "$st" == true ]] && ok "Нода «${name}» подключена к панели" || warn "Нода «${name}» пока не подключена — fail2detect panel check"
+        if [[ "$st" == true ]]; then
+            ok "Нода «${name}» подключена к панели"
+            local p443; for i in $(seq 1 10); do ss -H -tln '( sport = :443 )' 2>/dev/null | grep -q . && { p443=1; break; }; sleep 2; done
+            [[ -n "${p443:-}" ]] && ok "Xray поднял 443 — панель должна открываться" || warn "Нода подключена, но 443 пока не слушается (docker logs remnanode)"
+        else
+            err "Нода «${name}» не подключилась за минуту${msg:+: панель пишет «${msg}»}"
+        fi
     done <<<"$nodes"
+    ((found)) || info "В панели нет нод с адресом этого сервера (172.x/10.x) — локальная нода записана иначе"
     return 0
 }
 
@@ -143,13 +188,18 @@ panel_check() {
             *) warn "Страница входа ответила $code";;
         esac
     fi
-    # 6) нода на этом сервере
+    # 6) нода на этом сервере — с причиной, которую видит сама панель
     if has_node; then
-        local st; st=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r --arg gw "$(panel_docker_gateway)" '.response[]? | select(.address == $gw or (.address | test("^(127\\.|10\\.|172\\.|192\\.168\\.)"))) | "\(.name)\t\(.address)\t\(.isConnected)"' 2>/dev/null)
+        local st; st=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r --arg gw "$(panel_docker_gateway)" '.response[]? | select(.address == $gw or (.address | test("^(127\\.|10\\.|172\\.|192\\.168\\.)")))
+            | [.name, .address, (.isConnected | tostring), (.isDisabled | tostring), (.lastStatusMessage // "")] | join("\u001f")' 2>/dev/null)
         if [[ -n "$st" ]]; then
-            local n a c
-            while IFS=$'\t' read -r n a c; do
-                [[ "$c" == true ]] && ok "Нода «${n}» ($a) подключена" || { err "Нода «${n}» ($a) не подключена к панели — fail2detect panel fix"; bad=1; }
+            local n a c d msg
+            while IFS=$'\037' read -r n a c d msg; do
+                if [[ "$c" == true ]]; then ok "Нода «${n}» ($a) подключена"
+                else
+                    err "Нода «${n}» ($a) не подключена к панели$([[ "$d" == true ]] && echo " (выключена в панели)")${msg:+ — панель пишет: «${msg}»}"
+                    echo "    Починить по шагам: fail2detect panel fix"; bad=1
+                fi
             done <<<"$st"
         fi
     fi
@@ -161,6 +211,9 @@ panel_check() {
 panel_fix() {
     require_root
     load_config; config_set RW_API_URL "http://127.0.0.1:3000" >/dev/null
+    has_panel || { err "Панели на этом сервере нет (fail2detect detect)"; return 1; }
     panel_fix_local_node
+    echo
+    info "Итог — проверка панели:"
     panel_check
 }

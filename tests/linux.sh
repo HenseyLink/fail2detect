@@ -683,21 +683,36 @@ grep -q 'прежние' <<<"$out" && grep -q 'не меняются' <<<"$out" 
 printf 'login=admin7\npassword=S3cret!\n' > "$F2D_CONF_DIR/panel-admin.txt"
 out=$(panel_access_info 2>&1); grep -q 'admin7' <<<"$out" && grep -q 'S3cret!' <<<"$out" && pass "с panel-admin.txt — логин и пароль" || fail "panel-admin" "$out"
 rm -f "$F2D_CONF_DIR/panel-admin.txt"
-# нода на этом же сервере: шлюз docker другой — адрес в панели исправляется, UFW пускает docker-сеть
+# нода на этом же сервере: шаги panel fix (адрес, включение, порт, UFW, связь, переподключение)
 API_LOG="$WORK/api-panel.log"; : > "$API_LOG"; UFW_LOG="$WORK/ufw-panel.log"; : > "$UFW_LOG"
-docker() { case "$*" in
-    *"Gateway"*) echo "172.18.0.1 172.18.0.5";; *"IPPrefixLen"*) echo "172.18.0.5/16";;
-    "inspect remnawave -f {{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}}{{end}}") echo remnawave-network;;
-    *"network inspect"*) echo "172.18.0.0/16";; esac; }
-rw_api() { echo "$*" >> "$API_LOG"; case "$1 $2" in
-    "GET /api/nodes") echo '{"response":[{"uuid":"n1","name":"local","address":"172.30.0.1","port":2222},{"uuid":"n2","name":"de","address":"203.0.113.5","port":2222}]}';;
-    "GET /api/nodes/n1") echo '{"response":{"isConnected":true}}';;
-    "PATCH /api/nodes"*) echo '{"response":{"uuid":"n1"}}';; esac; }
+_fix_docker() {
+    case "$*" in
+        *"Gateway"*) echo "172.18.0.1 172.18.0.5";;
+        "inspect remnawave -f {{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}}{{\"\\n\"}}{{end}}") echo remnawave-network;;
+        *"network inspect"*) echo "172.18.0.0/16";;
+        "exec remnawave node -e"*) return "${PANEL_REACH:-0}";;
+    esac
+}
+_fix_api() {
+    echo "$*" >> "$API_LOG"
+    case "$1 $2" in
+        "GET /api/nodes") echo '{"response":[{"uuid":"n1","name":"local","address":"172.30.0.1","port":2222,"isDisabled":true},{"uuid":"n2","name":"de","address":"203.0.113.5","port":2222,"isDisabled":false}]}';;
+        "GET /api/nodes/n1") echo "{\"response\":{\"isConnected\":${NODE_OK:-true},\"lastStatusMessage\":\"connect ECONNREFUSED 172.18.0.1:2222\"}}";;
+        "PATCH /api/nodes"*|"POST /api/nodes"*) echo '{"response":{"uuid":"n1"}}';;
+    esac
+}
+docker() { _fix_docker "$@"; }; rw_api() { _fix_api "$@"; }
+ss() { echo "LISTEN 0 4096 *:2222"; }
 has_node() { true; }; ufw_active() { true; }; ufw() { echo "ufw $*" >> "$UFW_LOG"; }; NODE_API_PORT=2222; sleep() { :; }
-panel_fix_local_node >/dev/null 2>&1
-grep -q 'PATCH /api/nodes {"uuid":"n1","address":"172.18.0.1"}' "$API_LOG" && ! grep -q '"n2"' "$API_LOG" && pass "локальная нода: 172.30.0.1 → шлюз 172.18.0.1, внешние ноды не тронуты" || fail "адрес локальной ноды" "$(cat "$API_LOG")"
-grep -q 'allow proto tcp from 172.18.0.0/16 to any port 2222' "$UFW_LOG" && pass "UFW: API ноды открыт для docker-сети панели" || fail "UFW docker" "$(cat "$UFW_LOG")"
-unset -f docker rw_api has_node ufw_active ufw sleep
+out=$(panel_fix_local_node 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'POST /api/nodes/n1/actions/enable' "$API_LOG" && grep -q 'Была выключена' <<<"$out" && pass "нода выключена в панели — включается" || fail "enable" "$out"
+grep -q 'PATCH /api/nodes {"uuid":"n1","address":"172.18.0.1"}' "$API_LOG" && ! grep -q '"n2"' "$API_LOG" && pass "адрес → шлюз docker-сети, внешние ноды не тронуты" || fail "адрес ноды" "$(cat "$API_LOG")"
+grep -q 'allow proto tcp from 172.18.0.0/16 to any port 2222' "$UFW_LOG" && pass "UFW: docker-сеть панели → API ноды" || fail "UFW docker" "$(cat "$UFW_LOG")"
+grep -q 'POST /api/nodes/n1/actions/restart' "$API_LOG" && grep -q 'подключена к панели' <<<"$out" && pass "переподключение через API и ожидание" || fail "restart" "$out"
+grep -q 'Нода слушает API на порту 2222' <<<"$out" && grep -q 'Контейнер панели достаёт' <<<"$out" && pass "каждый шаг виден в выводе" || fail "вывод шагов" "$out"
+: > "$API_LOG"; out=$(PANEL_REACH=1 NODE_OK=false panel_fix_local_node 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'НЕ достаёт до 172.18.0.1:2222' <<<"$out" && grep -q 'ECONNREFUSED' <<<"$out" && pass "нет связи — названа причина и ответ панели" || fail "диагностика без связи" "$out"
+unset -f docker rw_api ss has_node ufw_active ufw sleep _fix_docker _fix_api
 RW_PANEL_DIR="$SAVED_PANEL_DIR"
 # перенос: все ssh/scp — через одно подключение (пароль один раз), у scp порт — -P
 SSH_LOG="$WORK/ssh.log"; : > "$SSH_LOG"
