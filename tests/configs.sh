@@ -12,7 +12,7 @@ export NO_COLOR=1 F2D_CONF_DIR="$WORK/etc"
 mkdir -p "$F2D_CONF_DIR"
 
 # shellcheck source=/dev/null
-for m in common detect transport certs site web; do source "$ROOT/lib/$m.sh"; done
+for m in common detect transport certs site web rurules; do source "$ROOT/lib/$m.sh"; done
 
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
@@ -55,6 +55,18 @@ if res=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/set.json:/c.json:r
 else
     fail "xray: 6 транспортов в одном профиле" "$(tail -5 <<<"$res")"
 fi
+# российский трафик: правила в профиле — Xray должен их принять (geosite:category-ru, ruleTag)
+for pol in block direct; do
+    inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443" | jq --arg id "$uuid" '.settings.clients=[{id:$id, flow:"xtls-rprx-vision"}]')
+    printf '5.1.1.0/24\n2a00:1::/32\n' > "$WORK/ru-pfx"
+    cfg=$(NODE_RU_POLICY=off profile_config "$inb")
+    ru_apply_to_config "$cfg" "$(ru_rules_json "$pol" yes "$WORK/ru-pfx")" > "$WORK/ru-$pol.json"
+    if res=$(docker run --rm -v "$WORK/ru-$pol.json:/c.json:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
+        pass "xray: российский трафик — $pol (зоны, сервисы, geosite:category-ru, geoip:ru, сети RIPE)"
+    else
+        fail "xray: российский трафик — $pol" "$(tail -5 <<<"$res")"
+    fi
+done
 # чужой target для Reality
 inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443" | jq --arg id "$uuid" '.settings.clients=[{id:$id, flow:"xtls-rprx-vision"}]')
 profile_config "$inb" > "$WORK/ext.json"

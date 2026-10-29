@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.8.0-beta"
+F2D_VERSION="0.9.0-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
@@ -167,6 +167,8 @@ config_defaults() {
     TRUSTED_IPS=""              # белый список (админ, мониторинг)
     STEALTH_ICMP="yes"          # не отвечать на ping
     DOCKER_GUARD="yes"          # не пускать извне в опубликованные docker-порты
+    NODE_RU_POLICY=""           # block|direct|off — российский трафик через ноду (выбор при установке)
+    NODE_RU_RIPE="no"           # yes — плюс все IP-сети России из RIPE NCC (fail2detect node ru-traffic update)
     BACKUP_KEEP="7"             # сколько автокопий панели хранить
     BACKUP_SCHEDULE=""          # daily|weekly — автокопии по таймеру (fail2detect backup schedule)
     BACKUP_TELEGRAM="no"        # отправлять автокопию в Telegram (только с паролем)

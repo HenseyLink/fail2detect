@@ -164,7 +164,8 @@ host_fields() {   # inbound_json address
 
 # базовый конфиг Xray для нового профиля
 profile_config() {   # inbound_json или [inbound, …]
-    jq -n --argjson i "$1" '{
+    local cfg
+    cfg=$(jq -n --argjson i "$1" '{
         log: { loglevel: "warning" },
         inbounds: (if ($i | type) == "array" then $i else [$i] end),
         outbounds: [
@@ -177,7 +178,12 @@ profile_config() {   # inbound_json или [inbound, …]
                 { protocol: ["bittorrent"], outboundTag: "BLOCK" }
             ]
         }
-    }'
+    }') || return 1
+    # российский трафик — по выбору при установке (rurules.sh)
+    if [[ "${NODE_RU_POLICY:-off}" != off ]] && declare -F ru_rules_for_profile >/dev/null; then
+        cfg=$(ru_apply_to_config "$cfg" "$(ru_rules_for_profile)") || return 1
+    fi
+    jq . <<<"$cfg"
 }
 
 # ---------- подготовка ноды под транспорт (выполняется на сервере ноды) ----------

@@ -430,6 +430,7 @@ install_node() {
             --transports) targ="$2"; shift;; --transport) one_t="$2"; shift;; --port) one_p="$2"; shift;;
             --domain) T_DOMAIN="$2"; shift;; --target) T_TARGET="$2"; shift;;
             --obfs) T_OBFS="$2"; shift;; --node-port) napi="$2"; shift;;
+            --ru) NODE_RU_POLICY="$2"; NODE_RU_POLICY_SET=1; shift;; --ru-ripe) NODE_RU_RIPE=yes;;
             *) die "Неизвестный параметр: $1";;
         esac; shift
     done
@@ -471,6 +472,7 @@ install_node() {
         ask "Код страны (2 буквы)" "${cc:-XX}"; cc="${REPLY^^}"
         ask "Адрес ноды для панели (IP или домен)" "$me"; local addr="$REPLY"
         ask_transports
+        ask_ru_policy "$cc"
         ph=$(sed -E 's#^https?://([^/:]+).*#\1#' <<<"$RW_API_URL")
         panel_ip=$(getent ahostsv4 "$ph" 2>/dev/null | awk 'NR==1{print $1}')
         [[ "$ph" == 127.0.0.1 ]] && panel_ip=127.0.0.1
@@ -520,6 +522,7 @@ install_node() {
         echo
         info "Создайте в панели профиль с этими inbound'ами (или используйте автоматический режим):"
         for t in "${T_LIST[@]}"; do echo "    fail2detect node inbound-json $t ${T_PORTS[$t]} ${T_DOMAIN:-\"\"} ${T_TARGET}"; done
+        info "Российский трафик на ноде (блок или напрямую) — на сервере панели: fail2detect node ru-traffic block"
     fi
     [[ "$mode" == auto && -n "${NODE_UUID:-}" ]] && balancer_offer "$name"
     echo
@@ -535,6 +538,7 @@ node_add() {   # [address]
     ask "Адрес ноды (IP или домен, к нему подключается панель)" "${1:-}"; local addr="$REPLY"
     ask "Код страны (2 буквы)" "XX"; local cc="${REPLY^^}"
     ASK_PORT_NOCHECK=1 ask_transports
+    ask_ru_policy "$cc"
     node_add_api "$name" "$addr" "$cc" "${T_DOMAIN:-$addr}" || return 1
     title "Дальше — на сервере ноды"
     echo "  bash <(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)"
@@ -550,6 +554,7 @@ node_add() {   # [address]
 node_add_local() {
     info "Нода на этом же сервере"
     ask_transports
+    ask_ru_policy
     local gw; gw=$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
     [[ -n "$gw" ]] || gw="172.17.0.1"
     node_add_api "local" "$gw" "XX" "${T_DOMAIN:-$(public_ip)}" || return 1

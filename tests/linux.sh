@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs site web remnawave balancer installer remove backup setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -585,6 +585,40 @@ for m in firewall detect; do source "$ROOT/lib/$m.sh"; done
 eval "$stubs_save" 2>/dev/null; has_node()  { [[ "$STUB_NODE" == yes ]]; }; fw_mode() { echo "$STUB_MODE"; }; ufw_active() { false; }; wan_iface() { echo eth0; }
 detect_ssh_ports() { echo 2233; }; detect_xray_ports() { echo 443; }; detect_node_api_port() { echo 2222; }; detect_panel_ips() { echo "198.51.100.200 2001:db8:abcd::1"; }
 has_panel() { [[ "$STUB_PANEL" == yes ]]; }; has_sub_page() { false; }
+
+section "Российский трафик на ноде"
+[[ "$(ru_rules_json off no)" == "[]" ]] && pass "off — без правил" || fail "off"
+r=$(ru_rules_json block no)
+jq -e 'length == 2 and all(.outboundTag == "BLOCK") and (.[0].domain | index("geosite:category-ru") and index("domain:ru") and index("domain:xn--p1ai") and index("domain:yandex.net"))
+    and .[1].ip == ["geoip:ru"]' >/dev/null <<<"$r" && pass "block: зоны .ru/.su/.рф, сервисы, geosite/geoip" || fail "block" "$r"
+[[ "$(ru_rules_json direct no | jq -r '.[0].outboundTag')" == DIRECT ]] && pass "direct → DIRECT" || fail "direct"
+printf '5.1.1.0/24\n2a00:1::/32\n' > "$WORK/pfx"
+[[ "$(ru_rules_json block yes "$WORK/pfx" | jq -c '.[1].ip')" == '["geoip:ru","5.1.1.0/24","2a00:1::/32"]' ]] && pass "сети RIPE добавляются к geoip:ru" || fail "ripe в правилах"
+base=$(NODE_RU_POLICY=off profile_config '{"tag":"x","port":1,"protocol":"vless"}')
+c1=$(ru_apply_to_config "$base" "$r")
+jq -e '.routing.rules[0].ip == ["geoip:private"] and .routing.rules[1].ruleTag == "f2d-ru-domains" and .routing.rules[2].ruleTag == "f2d-ru-ip"
+    and .routing.rules[3].protocol == ["bittorrent"]' >/dev/null <<<"$c1" && pass "правила — сразу после блокировки частных сетей" || fail "порядок правил" "$(jq -c .routing.rules <<<"$c1")"
+c2=$(ru_apply_to_config "$c1" "$(ru_rules_json direct no)")
+[[ "$(jq '[.routing.rules[] | select(.ruleTag // "" | startswith("f2d-ru-"))] | length' <<<"$c2")" == 2 && "$(ru_policy_of "$c2")" == direct ]] \
+    && pass "повторное применение заменяет, а не дублирует" || fail "дубли правил"
+c3=$(ru_apply_to_config "$c2" '[]'); [[ "$(ru_policy_of "$c3")" == off && "$(jq '.routing.rules | length' <<<"$c3")" == 2 ]] && pass "off убирает только свои правила" || fail "off убирает"
+big=$(seq 1 150 | awk '{print "10." $1 ".0.0/16"}' > "$WORK/pfx150"; ru_rules_json block yes "$WORK/pfx150")
+[[ "$(ru_policy_of "$(ru_apply_to_config "$base" "$big")")" == "block ripe" ]] && pass "политика определяется (block + сети RIPE)" || fail "ru_policy_of ripe"
+# чужой профиль без outbounds DIRECT/BLOCK — их добавим
+c4=$(ru_apply_to_config '{"outbounds":[{"tag":"warp","protocol":"wireguard"}],"routing":{"rules":[]}}' "$r")
+[[ "$(jq -c '[.outbounds[].tag]' <<<"$c4")" == '["warp","DIRECT","BLOCK"]' ]] && pass "в чужом профиле добавляются outbound'ы DIRECT/BLOCK" || fail "outbounds" "$(jq -c .outbounds <<<"$c4")"
+[[ "$(printf '10.0.0.0/25\n10.0.0.128/25\n10.0.1.0/24\n10.0.0.0/24\n192.168.1.0/24\n192.168.3.0/24\n' | ru_aggregate_v4 | tr '\n' ' ')" == "10.0.0.0/23 192.168.1.0/24 192.168.3.0/24 " ]] \
+    && pass "склейка IPv4: соседние и вложенные префиксы" || fail "ru_aggregate_v4"
+# профиль при установке: выбор block + RIPE (RIPE — заглушка)
+curl() { jq -nc '{data: {resources: {ipv4: ([range(0; 1200)] | map("5.\(. / 256 | floor).\(. % 256).0/24")), ipv6: ["2a00:1::/32"]}}}'; }
+RU_RIPE_CACHE="$WORK/ru-cache.txt"
+p=$(NODE_RU_POLICY=block NODE_RU_RIPE=yes profile_config '{"tag":"x","port":1,"protocol":"vless"}')
+jq -e '.routing.rules[1].outboundTag == "BLOCK" and (.routing.rules[2].ip | length) < 1200 and (.routing.rules[2].ip | index("2a00:1::/32"))' >/dev/null <<<"$p" \
+    && pass "новый профиль: блок РФ + сети RIPE (склеены: $(jq '.routing.rules[2].ip | length' <<<"$p") из 1201)" || fail "profile_config с RU" "$(jq -c '.routing.rules[2].ip[:3]' <<<"$p")"
+[[ -s "$RU_RIPE_CACHE" ]] && pass "список RIPE сохранён в кэш (на случай недоступности RIPE)" || fail "кэш RIPE"
+curl() { return 22; }
+[[ "$(ru_ripe_prefixes 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]] && pass "RIPE недоступен — берётся кэш" || fail "fallback на кэш"
+unset -f curl
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

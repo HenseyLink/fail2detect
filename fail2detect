@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs site web remnawave balancer installer remove backup setup ipquality geocheck speedtest bench censorcheck update; do
+for _m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -38,7 +38,8 @@ ${C_BOLD}Настройка${C_RESET}
 ${C_BOLD}Установка Remnawave${C_RESET}
   install panel             панель (+ подписка, + нода на этом же сервере)
   install node [опции]      нода: авто (всё создаёт в панели через API) или вручную (SECRET_KEY);
-                            один или несколько транспортов (запасные — если основной глушат)
+                            один или несколько транспортов (запасные — если основной глушат);
+                            --ru block|direct|off [--ru-ripe] — российский трафик через ноду
   install sub               страница подписки
   reinstall node|panel      переустановить (удалить с резервной копией и поставить заново)
   remove node|panel         удалить ноду или панель (архив + дамп базы в /var/lib/fail2detect/backup)
@@ -93,6 +94,9 @@ ${C_BOLD}Резервные копии и перенос панели${C_RESET}
   backup schedule daily|weekly|off [--keep N] [--telegram]     автокопии по таймеру
   panel migrate --to root@<новый сервер>   перенести панель целиком (копия → SSH → восстановление)
   node panel-ip <IP> [--replace <старый>]  на ноде: пустить новую панель после переноса
+  node ru-traffic block|direct|off|status|update [--ripe] [--profile ИМЯ]
+                            российский трафик на нодах (профили панели): блок или напрямую;
+                            --ripe — все IP-сети России из RIPE, update — обновить их
 
 ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
@@ -283,6 +287,7 @@ menu_node() {
         menu_item 6 "Включить лог Xray (jail reality)"
         menu_item 7 "Добавить запасные транспорты к ноде"
         menu_item 8 "Балансировщик «Авто» (лучшая нода по пингу, белые списки)"
+        menu_item 9 "Российский трафик на нодах: блокировать / напрямую"
         menu_item 0 "Назад"
         ask "Выбор" ""
         case "$REPLY" in
@@ -294,6 +299,14 @@ menu_node() {
             6) node_logs_enable;;
             7) node_transport_add;;
             8) menu_balancer;;
+            9) node_ru_traffic status
+               echo "   1. блокировать   2. напрямую   3. не трогать (убрать правило)   4. обновить сети RIPE"
+               ask "Вариант" ""
+               case "$REPLY" in
+                   1|2) local pol=block; [[ "$REPLY" == 2 ]] && pol=direct
+                        if confirm "С IP-сетями России из RIPE (не зависит от гео-баз GitHub)?" y; then node_ru_traffic "$pol" --ripe; else node_ru_traffic "$pol" --no-ripe; fi;;
+                   3) node_ru_traffic off;; 4) node_ru_traffic update;;
+               esac;;
             0|q|"") return;;
         esac
         pause
@@ -471,13 +484,14 @@ main() {
                         transport) node_transport_change "${2:-}";;
                         add-transport) node_transport_add "${2:-}";;
                         panel-ip) shift; node_panel_ip "$@";;
+                        ru-traffic|ru) shift; node_ru_traffic "$@";;
                         prepare) shift; node_prepare_cli "$@";;
                         inbound-json) node_inbound_json "${2:-}" "${3:-443}" "${4:-}" "${5:-}";;
                         port) node_port_change "${2:?порт}" "${3:-}";;
                         api-port) node_api_port_change "${2:?порт}";;
                         inbounds) rw_show_inbounds;;
                         logs) node_logs_enable;;
-                        *) die "node add|transport|add-transport|panel-ip|port|prepare|inbound-json|api-port|inbounds|logs";;
+                        *) die "node add|transport|add-transport|panel-ip|ru-traffic|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
         bench|benchmark) bench_run "$@";;
