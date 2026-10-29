@@ -484,7 +484,53 @@ node_panel_ip() {   # новый_IP [--replace старый | --add]
     for ip in $ips; do ufw_allow "$napi" tcp "$ip" "Remnawave panel"; done
     config_set PANEL_IPS "$ips"
     fw_apply >/dev/null && ok "API ноды ($napi/tcp) открыт для: $ips"
+    # правила iptables сторонних установщиков: «порт API ноды — только с IP панели»
+    node_api_iptables_sync "$napi" "$ips" "$old"
     audit_write NODE_PANEL_IP - - - "$ips"
+}
+
+# Сторонние установщики закрывают API ноды прямыми правилами iptables:
+#   -I INPUT -p tcp --dport 2222 -s <IP панели> -j ACCEPT
+#   -A INPUT -p tcp --dport 2222 -j DROP          (+ netfilter-persistent save)
+# После переноса панели они не пускают новую. Здесь: разрешения с публичных адресов,
+# которых нет среди новых IP панели, — убрать (с --replace — только старый IP);
+# новые — добавить, если для порта стоит запрет. Служебные (127.0.0.1, docker-сети,
+# частные диапазоны) не трогаем.
+node_api_iptables_sync() {   # порт "IP панели через пробел" [старый_IP]
+    local port="$1" ips="$2" old="${3:-}" fam cmd changed=0 line src ip
+    for fam in 4 6; do
+        if [[ $fam == 4 ]]; then cmd=iptables; else cmd=ip6tables; fi
+        have "$cmd" || continue
+        local rules; rules=$("$cmd" -S INPUT 2>/dev/null | grep -E -- "--dport $port( |$)")
+        [[ -n "$rules" ]] || continue
+        # 1) старые разрешения
+        while IFS= read -r line; do
+            [[ "$line" == *"-j ACCEPT"* && "$line" == *" -s "* ]] || continue
+            src=$(sed -nE 's/.* -s ([^ ]+).*/\1/p' <<<"$line"); ip="${src%/32}"; ip="${ip%/128}"
+            _is_private_ip "$ip" || [[ "$ip" == ::1 || "$ip" == 127.* || "$src" == */* && "$src" != */32 && "$src" != */128 ]] && continue
+            [[ " $ips " == *" $ip "* ]] && continue
+            [[ -n "$old" && "$ip" != "$old" ]] && continue
+            local -a del; read -r -a del <<<"${line/-A INPUT/-D INPUT}"
+            if "$cmd" "${del[@]}" 2>/dev/null; then ok "$cmd: убрал доступ старой панели $ip к порту $port"; changed=1; fi
+        done <<<"$rules"
+        # 2) новые — если порт закрыт запретом (иначе правило не нужно)
+        if grep -qE -- "-j (DROP|REJECT)" <<<"$rules"; then
+            for ip in $ips; do
+                if [[ $fam == 4 ]]; then is_ipv4 "$ip" || continue; else is_ipv6 "$ip" || continue; fi
+                "$cmd" -C INPUT -p tcp --dport "$port" -s "$ip" -j ACCEPT 2>/dev/null && continue
+                "$cmd" -I INPUT -p tcp --dport "$port" -s "$ip" -j ACCEPT && { ok "$cmd: разрешил панели $ip порт $port"; changed=1; }
+            done
+        fi
+    done
+    ((changed)) || return 0
+    # сохранить, иначе после перезагрузки вернутся старые правила
+    if have netfilter-persistent; then netfilter-persistent save >/dev/null 2>&1 && ok "Правила iptables сохранены (netfilter-persistent)"
+    elif [[ -d /etc/iptables ]]; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null; have ip6tables-save && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
+        ok "Правила iptables сохранены в /etc/iptables"
+    else
+        warn "Правила iptables изменены, но не сохранены — после перезагрузки вернутся старые (поставьте iptables-persistent)"
+    fi
 }
 
 # ---------------------------------------------------------------- расписание

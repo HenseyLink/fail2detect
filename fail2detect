@@ -97,6 +97,7 @@ ${C_BOLD}Резервные копии и перенос панели${C_RESET}
   panel migrate --to root@<новый сервер>   перенести панель целиком (копия → SSH → восстановление)
   panel check | fix | url   почему панель не открывается / починить ноду на этом сервере / ссылка входа
   node panel-ip <IP> [--replace <старый>]  на ноде: пустить новую панель после переноса
+                            (fail2detect, UFW и iptables сторонних установщиков)
   node ru-traffic bypass [--ripe] [--template ИМЯ|№ … | --all]
                             ОБХОД: российское мимо VPN на устройстве — правило в JSON-шаблонах
                             подписки (Happ/v2rayNG в режиме JSON); bypass-off — убрать

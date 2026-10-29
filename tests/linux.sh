@@ -878,6 +878,45 @@ source "$ROOT/lib/common.sh"; source "$ROOT/lib/backup.sh"; load_config
 F2D_BACKUP_DIR="${F2D_STATE_DIR}/backup"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
+section "IP панели в iptables сторонних установщиков"
+IPT="$WORK/ipt.rules"; IPT_LOG="$WORK/ipt.log"
+_ipt_reset() {
+    cat > "$IPT" <<'R'
+-P INPUT ACCEPT
+-A INPUT -s 127.0.0.1/32 -p tcp -m tcp --dport 2222 -j ACCEPT
+-A INPUT -s 198.51.100.7/32 -p tcp -m tcp --dport 2222 -j ACCEPT
+-A INPUT -s 203.0.113.50/32 -p tcp -m tcp --dport 2222 -j ACCEPT
+-A INPUT -s 172.16.0.0/12 -p tcp -m tcp --dport 2222 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 2222 -j DROP
+-A INPUT -p tcp -m tcp --dport 8888 -j ACCEPT
+R
+    : > "$IPT_LOG"
+}
+_ipt() {   # заглушка iptables: -S, -D (точная строка), -C, -I
+    case "$1" in
+        -S) cat "$IPT";;
+        -D) shift; local l="-A $*"; grep -qxF -- "$l" "$IPT" || return 1; grep -vxF -- "$l" "$IPT" > "$IPT.n"; mv "$IPT.n" "$IPT"; echo "D ${l}" >> "$IPT_LOG";;
+        # iptables -C|-I INPUT -p tcp --dport ПОРТ -s IP -j ACCEPT → $6 — порт, $8 — IP
+        -C) grep -qE -- "-s $8(/32)? .*--dport $6 .*-j ACCEPT" "$IPT";;
+        -I) { head -1 "$IPT"; echo "-A INPUT -s $8/32 -p tcp -m tcp --dport $6 -j ACCEPT"; tail -n +2 "$IPT"; } > "$IPT.n"; mv "$IPT.n" "$IPT"; echo "I $8" >> "$IPT_LOG";;
+    esac
+}
+iptables() { _ipt "$@"; }; netfilter-persistent() { echo "SAVE" >> "$IPT_LOG"; }; have() { [[ "$1" != ip6tables ]] && command -v "$1" >/dev/null 2>&1 || [[ "$1" == iptables || "$1" == netfilter-persistent ]]; }
+_ipt_reset; node_api_iptables_sync 2222 "192.0.2.10" 198.51.100.7 >/dev/null 2>&1
+grep -q -- '-s 192.0.2.10/32 .*--dport 2222 -j ACCEPT' "$IPT" && ! grep -q 198.51.100.7 "$IPT" && grep -q 203.0.113.50 "$IPT" \
+    && pass "--replace: старая панель убрана, новая добавлена, другой адрес не тронут" || fail "replace" "$(cat "$IPT")"
+grep -q '127.0.0.1/32' "$IPT" && grep -q '172.16.0.0/12' "$IPT" && grep -q 'dport 8888' "$IPT" && grep -q -- '--dport 2222 -j DROP' "$IPT" \
+    && pass "служебные правила, запрет и чужие порты на месте" || fail "служебные" "$(cat "$IPT")"
+grep -qx SAVE "$IPT_LOG" && pass "правила сохранены (netfilter-persistent)" || fail "сохранение" "$(cat "$IPT_LOG")"
+_ipt_reset; node_api_iptables_sync 2222 "192.0.2.10" >/dev/null 2>&1
+! grep -qE '198.51.100.7|203.0.113.50' "$IPT" && grep -q 192.0.2.10 "$IPT" && pass "без --replace: все прежние публичные адреса заменены новым" || fail "замена всех" "$(cat "$IPT")"
+_ipt_reset; sed -i.bak '/DROP/d' "$IPT"; node_api_iptables_sync 2222 "192.0.2.10" 198.51.100.7 >/dev/null 2>&1
+! grep -q '^I ' "$IPT_LOG" && pass "запрета нет — новое правило не нужно и не добавляется" || fail "без DROP" "$(cat "$IPT_LOG")"
+_ipt_reset; node_api_iptables_sync 2222 "192.0.2.10 198.51.100.7 203.0.113.50" >/dev/null 2>&1
+[[ "$(grep -c '^D ' "$IPT_LOG")" == 0 && "$(grep -c '^I ' "$IPT_LOG")" == 1 ]] && pass "--add: старые остаются, добавлен только новый" || fail "add" "$(cat "$IPT_LOG")"
+unset -f iptables netfilter-persistent have _ipt _ipt_reset
+source "$ROOT/lib/common.sh"; load_config
+
 section "Устойчивость (pipefail, ловушки)"
 # IP администратора первым в длинном списке: с pipefail проверка не должна «терять» админа
 _many_admins() { echo 203.0.113.7; seq 1 200000 | awk '{print "10." int($1/65536) "." int($1/256)%256 "." $1%256}'; }

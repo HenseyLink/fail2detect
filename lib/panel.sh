@@ -100,6 +100,17 @@ panel_fix_local_node() {
         else
             info "UFW выключен — не мешает"
         fi
+        # прямые правила iptables сторонних установщиков: «порт ноды — только с IP панели, остальным DROP»
+        # (вывод читаем целиком — без «| grep -q» в условии, см. ufw_active)
+        local iprules=""; have iptables && iprules=$(iptables -S INPUT 2>/dev/null | grep -E -- "--dport $port( |$)")
+        if [[ -n "$net" ]] && grep -qE -- "-j (DROP|REJECT)" <<<"$iprules"; then
+            if iptables -C INPUT -p tcp --dport "$port" -s "$net" -j ACCEPT 2>/dev/null || grep -q -- "-s 172.16.0.0/12 .*-j ACCEPT" <<<"$iprules"; then
+                ok "iptables: docker-сеть панели уже пускается к порту $port"
+            elif iptables -I INPUT -p tcp --dport "$port" -s "$net" -j ACCEPT; then
+                ok "iptables: разрешил docker-сеть панели $net → порт $port (там стоял запрет)"
+                have netfilter-persistent && netfilter-persistent save >/dev/null 2>&1
+            fi
+        fi
         # фаервол fail2detect: порт API ноды должен быть в наборе node_api — проверяем
         # действующие правила, а не код возврата (раньше порт мог определиться неверно)
         if nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1; then
