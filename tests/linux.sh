@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest bench; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -461,6 +461,37 @@ grep -q 'Москва.*10.0 мс' <<<"$out" && grep -q 'Казань.*недос
 unset -f iperf3 timeout ping curl bars
 # shellcheck source=/dev/null
 source "$ROOT/lib/bench.sh"
+if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
+
+section "CensorCheck"
+st_lc_saved="${LC_ALL:-}"; export LC_ALL=C.UTF-8
+cc_bogus_ip 127.0.0.1 && cc_bogus_ip 10.10.1.1 && cc_bogus_ip 0.0.0.0 && ! cc_bogus_ip 8.8.8.8 && pass "служебные адреса DNS-заглушек" || fail "cc_bogus_ip"
+for p in "131072 206 0 ok" "16384 206 28 cut" "0 206 28 stall" "0 000 28 tls" "0 000 7 conn" "60000 206 28 slow" "262144 200 0 ok"; do
+    read -r b c x want <<<"$p"; [[ "$(cc_16k_verdict "$b" "$c" "$x")" == "$want" ]] || fail "16 КБ: $p" "$(cc_16k_verdict "$b" "$c" "$x")"
+done; pass "16 КБ: без обрыва / обрыв ~16 КБ / данные не идут / TLS / нет соединения"
+[[ "$(_cc_http_cell '{"code":302,"redirect":"http://warning.rt.ru/?id=1","exit":0}')" == "302 → стоп-стр." ]] && pass "HTTP → стоп-страница провайдера" || fail "стоп-страница"
+[[ "$(_cc_http_cell '{"code":0,"redirect":null,"exit":28}')" == таймаут && "$(_cc_http_cell '{"code":0,"redirect":null,"exit":56}')" == сброс ]] && pass "таймаут и сброс" || fail "таймаут/сброс"
+# классификация сайта: заглушки сети
+CC_NET=""
+cc_resolve_sys() { case "$1" in spoof.example) echo 10.0.0.1;; dead.example) echo 203.0.113.66;; *) echo 203.0.113.10;; esac; }
+cc_resolve_doh() { case "$1" in dead.example) echo 203.0.113.77;; *) echo 203.0.113.10;; esac; }
+cc_tcp() { [[ "$1" == 203.0.113.66 ]] && return 1; [[ "$CC_NET" == ipblock ]] && return 1; return 0; }
+cc_req() { case "$CC_NET" in
+    ok) [[ "$1" == http://* ]] && echo "302|http://warning.rt.ru/|0" || echo "200||0";;
+    sni|tls) [[ "$1" == http://* ]] && echo "200||0" || echo "000||28";;
+    451) echo "451||0";; esac; }
+cc_nosni() { [[ "$CC_NET" == sni ]]; }
+v() { cc_check_site "$1" | jq -r '.verdict + " " + .dns'; }
+CC_NET=ok;  [[ "$(v site.example)" == "stub_http ok" ]] && pass "HTTPS работает, HTTP → стоп-страница" || fail "stub_http" "$(v site.example)"
+CC_NET=sni; [[ "$(v site.example)" == "sni ok" ]] && pass "TLS с SNI обрывается, без SNI проходит → DPI по SNI" || fail "sni" "$(v site.example)"
+CC_NET=tls; [[ "$(v site.example)" == "tls ok" ]] && pass "TLS обрывается и без SNI" || fail "tls" "$(v site.example)"
+CC_NET=451; [[ "$(v site.example)" == "451 ok" ]] && pass "ответ 451" || fail "451"
+CC_NET=ipblock; [[ "$(v site.example)" == "ip ok" ]] && pass "порты 80 и 443 закрыты → блок по IP" || fail "ip" "$(v site.example)"
+CC_NET=ok;  [[ "$(v spoof.example)" == "stub_http spoofed" ]] && pass "DNS отдал частный адрес → подмена, проверка по IP из DoH" || fail "spoof" "$(v spoof.example)"
+CC_NET=ok;  [[ "$(v dead.example)" == "stub_http spoofed" ]] && pass "системный IP мёртв, IP из DoH живой → подмена" || fail "dead→doh" "$(v dead.example)"
+unset -f cc_resolve_sys cc_resolve_doh cc_tcp cc_req cc_nosni v
+# shellcheck source=/dev/null
+source "$ROOT/lib/censorcheck.sh"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
 section "CLI"

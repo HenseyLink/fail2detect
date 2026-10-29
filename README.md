@@ -1,6 +1,6 @@
 # fail2detect
 
-**Версия 0.6.0-beta.** Проект в бета-версии: проверяйте на тестовом сервере, прежде чем ставить на рабочие ноды.
+**Версия 0.7.0-beta.** Проект в бета-версии: проверяйте на тестовом сервере, прежде чем ставить на рабочие ноды.
 
 Защита нод и панели [Remnawave](https://github.com/remnawave) от сканеров РКН, активного зондирования и брутфорса.
 
@@ -184,7 +184,7 @@ fail2detect balancer remove    # убрать (ноды и хосты остаю
 - Отдельный сервер не нужен. «Авто» — виртуальная запись: адрес и inbound у неё взяты от первой ноды пула, но клиент подключается напрямую к нодам пула.
 - Запись «Авто» видят только клиенты с подпиской Xray JSON: Happ, INCY, v2rayNG, Streisand, V2Box. По обычной ссылке подписки они получают base64, поэтому `balancer setup` включает в панели «Отдавать JSON на базовом пути подписки». `balancer remove` возвращает настройку, если её включил fail2detect. У внешних squad'ов эта настройка задаётся отдельно. В остальных форматах запись скрыта.
 
-### 6. GeoCheck, IPQuality и Cloudflare Speedtest
+### 6. Тесты: GeoCheck, IPQuality, Speedtest, CensorCheck, бенчмарк
 
 ```bash
 fail2detect geo               # GeoCheck: в какой стране IP видят сервисы, CDN и гео-базы
@@ -197,6 +197,7 @@ fail2detect speed --plain     # без дашборда, только итог (
 fail2detect speed --json      # итог в JSON
 fail2detect speed history     # последние 20 замеров
 fail2detect bench             # бенчмарк: скорость и пинг до провайдеров России и зарубежа
+fail2detect censor            # CensorCheck: что режет DPI (ТСПУ) на этом сервере
 ```
 
 **GeoCheck** спрашивает у самих сервисов, в какой стране они видят этот IP, отдельно по IPv4 и IPv6. Каждый сервис пользуется своей базой, поэтому ответы расходятся, и ради этого отчёт и нужен. Проверяются три группы:
@@ -215,6 +216,26 @@ fail2detect bench             # бенчмарк: скорость и пинг �
 6. **Почта:** исходящий порт 25, подключение к почтовым сервисам, около 20 чёрных списков (DNSBL).
 
 Для ноды VPN самые важные разделы 2–4: по ним сервисы отличают VPN-сервер от обычного абонента.
+
+**CensorCheck** показывает, что режет DPI (ТСПУ) на сервере. Полезнее всего запускать его на российских серверах: мостах, релеях, серверах для белых списков.
+
+```bash
+fail2detect censor                       # 22 сайта + 10 зарубежных хостингов, около минуты
+fail2detect censor youtube.com x.com     # только свои сайты
+fail2detect censor --no-hosting          # без теста хостингов
+fail2detect censor --json                # результаты в JSON
+```
+
+- **Сайты.** Список и HTTP/HTTPS-проверки взяты из режима `--mode dpi` в [censorcheck](https://github.com/vernette/censorcheck) (MIT), код свой. Для каждого сайта определяется причина недоступности:
+  - DNS-подмена: системный ответ сверяется с DoH (Cloudflare, Google);
+  - блок по IP: закрыты порты 80 и 443;
+  - DPI по SNI: с SNI соединение TLS обрывается, а тот же IP без SNI отвечает;
+  - обрыв TLS при любом SNI;
+  - ответ 451;
+  - стоп-страница провайдера на HTTP.
+- **Контроль.** Сначала проверяются ya.ru и vk.com. Если не открываются и они, значит, сломана сама сеть сервера, а не работает DPI.
+- **Зарубежные хостинги: обрыв после 16 КБ.** ТСПУ пропускает начало соединения с VPS и обрывает его примерно на 16 КБ, поэтому VPN и прокси подключаются, но сразу рвутся. С каждого хостинга (Hetzner, DigitalOcean, OVH, Linode, Vultr, DataPacket, Cloudflare) качаются первые 128 КБ. Результат: прошло целиком, оборвалось на N КБ, данные не идут или TLS не установился. Так видно, у каких хостингов VPN-ноды из этой сети будут рваться.
+- Адреса 198.18.x.x помечаются как fake-IP локального прокси (Clash, sing-box). Такие сайты проверялись через прокси, поэтому их результат ничего не говорит о блокировках в этой сети.
 
 **Бенчмарк сети** меряет скорость и пинг от сервера до провайдеров в России и за рубежом. Для VPN-ноды это показывает, как быстро до неё дотягиваются пользователи из разных регионов.
 
@@ -319,6 +340,7 @@ Remnawave обновляется независимо от версии fail2det
 - [shadow-netlab/traffic-guard-lists](https://github.com/shadow-netlab/traffic-guard-lists), [tread-lightly/CyberOK_Skipa_ips](https://github.com/tread-lightly/CyberOK_Skipa_ips) — списки сканеров
 - [Remnawave](https://github.com/remnawave) — официальные compose-файлы для установки
 - [vernette/ipregion](https://github.com/vernette/ipregion) — способы определения регионов для GeoCheck
+- [vernette/censorcheck](https://github.com/vernette/censorcheck) — список сайтов и проверки CensorCheck (код свой)
 - [xykt/IPQuality](https://github.com/xykt/IPQuality) — структура отчёта IPQuality
 - [bench.gig.ovh](https://gig.ovh) (DigneZzZ), [teddysun/bench.sh](https://github.com/teddysun/across) — списки серверов для бенчмарка (код свой)
 - [kavehtehrani/cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli) — методика speedtest (код свой)

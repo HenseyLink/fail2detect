@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest bench update; do
+for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -94,6 +94,9 @@ ${C_BOLD}Сеть${C_RESET}
                             в простое и под нагрузкой, потери UDP, Bufferbloat, стабильность)
   speed --plain | --json    без дашборда: итог текстом / JSON
   speed history             история замеров (в дашборде: A автосохранение, R заново, H история)
+  censor [сайт…] [--no-hosting] [--json]
+                            CensorCheck: какие сайты режет DPI (по SNI, по IP, DNS-подмена,
+                            стоп-страницы) и обрыв после 16 КБ до зарубежных хостингов
   bench [ru|world] [--ping] [--quick] [--threads N] [--ookla|--iperf] [--json]
                             бенчмарк: скорость и пинг до провайдеров России (iperf3)
                             и зарубежа (Ookla, как bench.sh, или iperf3)
@@ -284,7 +287,7 @@ menu_node() {
     done
 }
 
-# GeoCheck, IPQuality, Speedtest и бенчмарк — в одном месте
+# GeoCheck, IPQuality, Speedtest, CensorCheck и бенчмарк — в одном месте
 menu_tests() {
     while true; do
         banner
@@ -292,16 +295,17 @@ menu_tests() {
         menu_item 1 "GeoCheck (регион IP в сервисах)"
         menu_item 2 "IPQuality (репутация IP)"
         menu_item 3 "Cloudflare Speedtest (дашборд)"
+        menu_item 4 "CensorCheck: что режет DPI (ТСПУ) на этом сервере"
         echo "  ${C_GRAY}Бенчмарк сети: скорость и пинг до провайдеров${C_RESET}"
-        menu_item 4 "Россия + зарубеж"
-        menu_item 5 "Только Россия"
-        menu_item 6 "Только зарубеж"
-        menu_item 7 "Только пинг (быстро)"
+        menu_item 5 "Россия + зарубеж"
+        menu_item 6 "Только Россия"
+        menu_item 7 "Только зарубеж"
+        menu_item 8 "Только пинг (быстро)"
         menu_item 0 "Назад"
         ask "Выбор" ""
         case "$REPLY" in
-            1) geocheck_run;; 2) ipquality_run;; 3) speedtest_run;;
-            4) bench_run;; 5) bench_run ru;; 6) bench_run world;; 7) bench_run --ping;;
+            1) geocheck_run;; 2) ipquality_run;; 3) speedtest_run;; 4) censorcheck_run;;
+            5) bench_run;; 6) bench_run ru;; 7) bench_run world;; 8) bench_run --ping;;
             0|q|"") return;;
             *) continue;;
         esac
@@ -359,7 +363,7 @@ menu_main() {
         menu_item 4 "Фаервол и порты"
         menu_item 5 "Jail'ы (правила банов)"
         menu_item 6 "Нода: транспорт, порт, inbound'ы"
-        menu_item 7 "Тесты: GeoCheck, IPQuality, Speedtest, бенчмарк"
+        menu_item 7 "Тесты: GeoCheck, IPQuality, Speedtest, CensorCheck, бенчмарк"
         menu_item 8 "Установка панели / ноды / подписки"
         menu_item 9 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
         menu_item 0 "Выход"
@@ -451,6 +455,7 @@ main() {
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
         bench|benchmark) bench_run "$@";;
+        censor|censorcheck|dpi) censorcheck_run "$@";;
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;
         speed|speedtest)
