@@ -33,10 +33,18 @@ bk_dump_db() {   # файл.sql.gz
     gzip -dc "$1" 2>/dev/null | head -c 4096 | grep -q 'PostgreSQL database cluster dump' || { err "Дамп базы пустой или повреждён"; return 1; }
 }
 
+# Свежий том postgres сначала поднимает временный сервер (только unix-сокет) для
+# инициализации, потом перезапускается. Готовность — по TCP, это только настоящий
+# сервер, и дважды подряд, чтобы не попасть на перезапуск.
 bk_db_wait() {   # секунд
-    local i user; user=$(bk_db_user)
+    local i user ok=0; user=$(bk_db_user)
     for ((i = 0; i < ${1:-60}; i++)); do
-        docker exec "$RW_DB_CONTAINER" pg_isready -U "$user" >/dev/null 2>&1 && return 0
+        if docker exec "$RW_DB_CONTAINER" pg_isready -h 127.0.0.1 -U "$user" >/dev/null 2>&1 \
+            && docker exec "$RW_DB_CONTAINER" psql -h 127.0.0.1 -U "$user" -d postgres -tAc 'select 1' >/dev/null 2>&1; then
+            ok=$((ok + 1)); ((ok >= 2)) && return 0
+        else
+            ok=0
+        fi
         sleep 1
     done
     return 1
