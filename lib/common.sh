@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="0.5.0-beta"
+F2D_VERSION="0.6.0-beta"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
@@ -167,6 +167,8 @@ config_defaults() {
     TRUSTED_IPS=""              # белый список (админ, мониторинг)
     STEALTH_ICMP="yes"          # не отвечать на ping
     DOCKER_GUARD="yes"          # не пускать извне в опубликованные docker-порты
+    BENCH_OOKLA=""              # yes — зарубеж через Ookla CLI (согласились с лицензией), no — через iperf3
+    SPEEDTEST_SAVE="yes"        # сохранять замеры speedtest в историю (клавиша A в дашборде)
     UPDATE_CHECK="yes"          # проверять новую версию fail2detect при запуске меню (раз в 6 часов)
     BAN_SCOPE="except-xray"     # except-xray — бан не закрывает порты Xray (CGNAT мобильных); all — закрывает всё
     FLOOD_GUARD="no"            # бан за шквал новых соединений

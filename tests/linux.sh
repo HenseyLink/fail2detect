@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest bench; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -415,6 +415,52 @@ grep -q 'Bufferbloat   A ' <<<"$out" && grep -q 'Приемлемо' <<<"$out" &
 (( $(tail -n +3 <<<"$out" | max_width) <= 120 )) && pass "итоговый экран не шире 120 колонок" || fail "ширина экрана" "$(tail -n +3 <<<"$out" | max_width)"
 out=$(COLUMNS=80 st_render 10 10 yes | sed 's/\x1b\[[0-9;]*m//g')
 (( $(tail -n +3 <<<"$out" | max_width) <= 80 )) && pass "узкий терминал (80): панели друг под другом" || fail "ширина 80" "$(tail -n +3 <<<"$out" | max_width)"
+if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
+
+section "Бенчмарк сети"
+st_lc_saved="${LC_ALL:-}"; export LC_ALL=C.UTF-8
+iputils=$'PING st.spb.ertelecom.ru (1.2.3.4) 56(84) bytes of data.\n\n--- st.spb.ertelecom.ru ping statistics ---\n5 packets transmitted, 4 received, 20% packet loss, time 804ms\nrtt min/avg/max/mdev = 46.512/47.031/47.990/0.512 ms'
+busybox=$'--- 1.2.3.4 ping statistics ---\n5 packets transmitted, 5 packets received, 0% packet loss\nround-trip min/avg/max = 10.1/12.5/15.0 ms'
+[[ "$(bench_parse_ping <<<"$iputils")" == "47.031 20" ]] && pass "ping (iputils): среднее и потери" || fail "ping iputils" "$(bench_parse_ping <<<"$iputils")"
+[[ "$(bench_parse_ping <<<"$busybox")" == "12.5 0" ]] && pass "ping (busybox)" || fail "ping busybox" "$(bench_parse_ping <<<"$busybox")"
+[[ "$(bench_parse_ping <<<$'5 packets transmitted, 0 received, 100% packet loss')" == "- 100" ]] && pass "ping без ответа — 100% потерь" || fail "ping 100%"
+[[ "$(bench_parse_iperf <<<'{"end":{"sum_sent":{"bits_per_second":9.1e8},"sum_received":{"bits_per_second":912345678}}}')" == 912.35 ]] \
+    && pass "iperf3 JSON: скорость принимающей стороны" || fail "iperf3 JSON"
+[[ "$(bench_parse_iperf <<<'{"error":"the server is busy running a test. try again later"}')" == "ERR the server is busy running a test. try again later" ]] \
+    && pass "iperf3 JSON: ошибка" || fail "iperf3 ошибка"
+[[ "$(_bench_err_ru "ERR the server is busy running a test")" == "сервер занят" && "$(_bench_err_ru "ERR unable to connect to server: Connection refused")" == недоступен ]] \
+    && pass "ошибки iperf3 по-русски" || fail "ошибки iperf3"
+r=$(bench_parse_ookla <<<'{"type":"log"}
+{"type":"result","ping":{"latency":71.234},"download":{"bandwidth":62500000},"upload":{"bandwidth":12500000},"server":{"name":"Leaseweb","location":"Amsterdam"}}')
+[[ "$r" == $'71.2\x1f500\x1f100\x1fAmsterdam · Leaseweb' ]] && pass "Ookla JSON: пинг, ↓500 ↑100 Мбит/с, сервер" || fail "Ookla JSON" "$r"
+bars() { bench_bar "$1" "" | sed 's/\x1b\[[0-9;]*m//g' | tr -cd '▰' | wc -m | tr -d ' '; }
+[[ "$(bars 1)" == 1 && "$(bars 100)" == 6 && "$(bars 10000)" == 12 && "$(bars 0)" == 0 ]] && pass "шкала логарифмическая: 1→1, 100→6, 10000→12 делений" || fail "bench_bar" "$(bars 1) $(bars 100) $(bars 10000)"
+# занятый сервер: повтор на соседнем порту
+IPERF_LOG="$WORK/iperf.log"; : > "$IPERF_LOG"
+iperf3() {
+    [[ "$1" == --help ]] && { echo "--connect-timeout"; return; }
+    local port=""; while (($#)); do [[ "$1" == -p ]] && port="$2"; shift; done
+    echo "$port" >> "$IPERF_LOG"
+    if [[ "$port" == 5201 ]]; then echo '{"error":"the server is busy running a test. try again later"}'
+    else echo '{"end":{"sum_received":{"bits_per_second":500000000}}}'; fi
+}
+timeout() { shift; "$@"; }
+BENCH_THREADS=8; BENCH_DUR=1
+[[ "$(bench_iperf host 5201 yes)" == 500 && "$(tr '\n' ' ' < "$IPERF_LOG")" == "5201 5202 " ]] && pass "сервер занят → следующий порт" || fail "повтор iperf3" "$(cat "$IPERF_LOG")"
+# полный прогон: один сервер отвечает, второй недоступен
+ping() { local h="${*: -1}"; [[ "$h" == bad.example ]] && { echo "5 packets transmitted, 0 received, 100% packet loss"; return 1; }
+    printf '5 packets transmitted, 5 received, 0%% packet loss\nrtt min/avg/max/mdev = 9/10.0/11/1 ms\n'; }
+curl() { case "$*" in *telnet://bad.example*) echo 0;; *speed.cloudflare.com/meta*) echo '{"clientIp":"203.0.113.9","asn":64500,"asOrganization":"Test","country":"NL"}';; *) command curl "$@";; esac; }
+BENCH_RU=('good.example:5203:Москва:Тест' 'bad.example:5201:Казань:Тест')
+out=$(bench_run ru --json 2>/dev/null)
+jq -e 'length == 2 and .[0].download == 500 and .[0].upload == 500 and .[0].ping == 10 and .[1].error == "недоступен" and .[1].download == null' >/dev/null <<<"$out" \
+    && pass "bench ru --json: результаты и недоступный сервер" || fail "bench --json" "$out"
+out=$(bench_run ru --ping 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tr '\r' '\n')
+grep -q 'Москва.*10.0 мс' <<<"$out" && grep -q 'Казань.*недоступен' <<<"$out" && grep -q 'ответили 1/2' <<<"$out" && ! grep -q '↓ —' <<<"$out" \
+    && pass "bench --ping: строки, итог без пустых ↓/↑" || fail "bench --ping" "$out"
+unset -f iperf3 timeout ping curl bars
+# shellcheck source=/dev/null
+source "$ROOT/lib/bench.sh"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
 section "CLI"

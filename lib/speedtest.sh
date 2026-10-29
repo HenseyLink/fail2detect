@@ -479,70 +479,131 @@ st_render() {   # dl_dur ul_dur final(yes|no)
         right=$(_st_box "$rw" "$C_GRAY" "${C_BOLD}Оценка$C_RESET" \
             "${C_GRAY}Bufferbloat$C_RESET   $(_st_grade_col "$bg")$C_BOLD$bg$C_RESET ${C_GRAY}+$(_st_fmt "$bb") мс под нагрузкой$C_RESET" \
             "${C_GRAY}Стабильность$C_RESET  $(_st_grade_col "$sg")$C_BOLD$sg$C_RESET ${C_GRAY}разброс ↓$(_st_fmt "$(jq -r '.cv_download // empty' <<<"$r")")% ↑$(_st_fmt "$(jq -r '.cv_upload // empty' <<<"$r")")%$C_RESET" \
-            "${C_GRAY}История$C_RESET       $([[ -n "${ST_SAVED:-}" ]] && echo "сохранено · f2d speed history" || echo "—")")
+            "${C_GRAY}История$C_RESET       $([[ -n "${ST_SAVED:-}" ]] && echo "сохранено · f2d speed history" || echo "не сохранено")")
         if ((W >= 100)); then _st_side 1 "$left" "$right"; else echo "$left"; echo "$right"; fi
     fi
 }
 
 # ---------------------------------------------------------------- запуск
-speedtest_run() {   # [--quick] [--plain] [--json]
+# клавиша дашборда → действие (английская и русская раскладка на тех же клавишах)
+_st_key_action() {
+    case "$1" in
+        q|Q|й|Й) echo quit;; r|R|к|К) echo restart;; h|H|р|Р) echo history;;
+        a|A|ф|Ф) echo autosave;; "") echo enter;; *) echo none;;
+    esac
+}
+
+_st_keys_line() {   # итог показан?
+    local sv="${C_GREEN}вкл${C_RESET}"; [[ "${SPEEDTEST_SAVE:-yes}" == yes ]] || sv="${C_RED}выкл${C_RESET}"
+    local st=""
+    if [[ "$1" == yes ]]; then
+        if [[ -n "${ST_SAVED:-}" ]]; then st=" ${C_GRAY}(замер сохранён)${C_RESET}"; else st=" ${C_GRAY}(замер не сохранён)${C_RESET}"; fi
+    fi
+    printf ' %sA%s автосохранение: %s%s   %sR%s заново   %sH%s история   %sQ%s выход' \
+        "$C_BOLD$C_YELLOW" "$C_RESET" "$sv" "$st" "$C_BOLD$C_YELLOW" "$C_RESET" "$C_BOLD$C_YELLOW" "$C_RESET" "$C_BOLD$C_YELLOW" "$C_RESET"
+}
+
+_st_save() {
+    [[ -s "$ST_T/result.json" ]] && mkdir -p "$ST_HISTORY_DIR" 2>/dev/null || return 1
+    ST_SAVED="$ST_HISTORY_DIR/$(date +%Y%m%d-%H%M%S).json"
+    cp "$ST_T/result.json" "$ST_SAVED" 2>/dev/null || { ST_SAVED=""; return 1; }
+    # имена — время замера, по ним и сортируем; храним 100 последних
+    local old=("$ST_HISTORY_DIR"/*.json)
+    ((${#old[@]} > 100)) && rm -f "${old[@]:0:${#old[@]}-100}"
+    return 0
+}
+
+# A: переключить автосохранение; на итоговом экране — сразу сохранить/убрать этот замер
+_st_toggle_save() {   # итог показан?
+    if [[ "${SPEEDTEST_SAVE:-yes}" == yes ]]; then
+        SPEEDTEST_SAVE=no; [[ $EUID -eq 0 ]] && config_set SPEEDTEST_SAVE no >/dev/null 2>&1
+        [[ "$1" == yes && -n "${ST_SAVED:-}" ]] && { rm -f "$ST_SAVED"; ST_SAVED=""; }
+    else
+        SPEEDTEST_SAVE=yes; [[ $EUID -eq 0 ]] && config_set SPEEDTEST_SAVE yes >/dev/null 2>&1
+        [[ "$1" == yes && -z "${ST_SAVED:-}" ]] && _st_save
+    fi
+}
+
+_st_frame() {   # dl ul final
+    local frame; frame=$(st_render "$@"; echo; _st_keys_line "$3")
+    printf '\033[H%s\033[J' "${frame//$'\n'/$'\033[K\n'}"
+}
+
+# H: история поверх дашборда
+_st_history_screen() {
+    local frame; frame=$(speedtest_history; echo; printf ' %sлюбая клавиша — назад%s' "$C_GRAY" "$C_RESET")
+    printf '\033[H%s\033[J' "${frame//$'\n'/$'\033[K\n'}"
+    read -rsn1 _ </dev/tty 2>/dev/null
+}
+
+_st_stop_engine() { kill "$1" 2>/dev/null; pkill -P "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+
+speedtest_run() {   # [--quick] [--plain] [--json] [--no-save]
     have curl || die "Нужен curl"; have jq || die "Нужен jq"
     ((BASH_VERSINFO[0] >= 5)) || die "Нужен bash 5+"
     local quick="" plain="" json="" a
-    for a in "$@"; do case "$a" in --quick) quick=1;; --plain) plain=1;; --json) json=1;; --tui) ;; esac; done
+    for a in "$@"; do case "$a" in --quick) quick=1;; --plain) plain=1;; --json) json=1;; --no-save) SPEEDTEST_SAVE=no;; --tui) ;; esac; done
     [[ -t 1 ]] || plain=1
     [[ -n "$json" ]] && plain=1
     local idle=2 dl=10 ul=10 udp=50
     [[ -n "$quick" ]] && { dl=5; ul=5; udp=25; }
 
-    ST_T=$(mktemp -d); ST_SAVED=""
-    local eng
-    _st_engine "$idle" "$dl" "$ul" "$udp" &
-    eng=$!
+    local eng key act
     # shellcheck disable=SC2064
-    trap "kill $eng 2>/dev/null; pkill -P $eng 2>/dev/null; printf '\033[?25h\033[?1049l'; rm -rf '$ST_T'; trap - INT TERM; exit 130" INT TERM
+    trap '[[ -n "${eng:-}" ]] && _st_stop_engine "$eng"; printf "\033[?25h\033[?1049l"; rm -rf "${ST_T:-/nonexistent}"; trap - INT TERM; exit 130' INT TERM
+    [[ -z "$plain" ]] && printf '\033[?1049h\033[?25l'
+    while true; do
+        ST_T=$(mktemp -d); ST_SAVED=""; act=""
+        _st_engine "$idle" "$dl" "$ul" "$udp" &
+        eng=$!
+        if [[ -z "$plain" ]]; then
+            while [[ ! -f "$ST_T/done" ]] && kill -0 "$eng" 2>/dev/null; do
+                _st_frame "$dl" "$ul" no
+                read -rsn1 -t 0.3 key </dev/tty 2>/dev/null || continue
+                case "$(_st_key_action "$key")" in
+                    quit) act=quit; break;;
+                    restart) act=restart; break;;
+                    autosave) _st_toggle_save no;;
+                    history) _st_history_screen;;
+                esac
+            done
+        else
+            local s='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0
+            while [[ ! -f "$ST_T/done" ]] && kill -0 "$eng" 2>/dev/null; do
+                [[ -z "$json" && -t 2 ]] && printf '\r  %s %s…\033[K' "${s:i++%10:1}" "$(cat "$ST_T/phase" 2>/dev/null)" >&2
+                sleep 0.3
+            done
+            [[ -z "$json" && -t 2 ]] && printf '\r\033[K' >&2
+        fi
+        if [[ -n "$act" ]]; then
+            _st_stop_engine "$eng"; rm -rf "$ST_T"
+            [[ "$act" == restart ]] && continue
+            printf '\033[?25h\033[?1049l'; trap - INT TERM; return 0
+        fi
+        wait "$eng" 2>/dev/null; eng=""
 
-    local key
-    if [[ -z "$plain" ]]; then
-        printf '\033[?1049h\033[?25l'
-        while [[ ! -f "$ST_T/done" ]] && kill -0 "$eng" 2>/dev/null; do
-            local frame; frame=$(st_render "$dl" "$ul" no)
-            printf '\033[H%s\033[J' "${frame//$'\n'/$'\033[K\n'}"
-            if read -rsn1 -t 0.3 key </dev/tty 2>/dev/null && [[ "$key" == q ]]; then
-                kill "$eng" 2>/dev/null; pkill -P "$eng" 2>/dev/null; break
-            fi
+        st_result_json "$dl" "$ul" > "$ST_T/result.json" 2>/dev/null
+        [[ "${SPEEDTEST_SAVE:-yes}" == yes ]] && _st_save
+
+        if [[ -n "$json" ]]; then cat "$ST_T/result.json"; break
+        elif [[ -n "$plain" ]]; then st_render "$dl" "$ul" yes; break; fi
+
+        # итоговый экран: ждём клавишу
+        while true; do
+            _st_frame "$dl" "$ul" yes
+            read -rsn1 key </dev/tty 2>/dev/null || { act=quit; break; }
+            act=$(_st_key_action "$key")
+            case "$act" in
+                quit|enter|restart) break;;
+                autosave) _st_toggle_save yes;;
+                history) _st_history_screen;;
+            esac
         done
-    else
-        local s='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0
-        while [[ ! -f "$ST_T/done" ]] && kill -0 "$eng" 2>/dev/null; do
-            [[ -z "$json" && -t 2 ]] && printf '\r  %s %s…\033[K' "${s:i++%10:1}" "$(cat "$ST_T/phase" 2>/dev/null)" >&2
-            sleep 0.3
-        done
-        [[ -z "$json" && -t 2 ]] && printf '\r\033[K' >&2
-    fi
-    wait "$eng" 2>/dev/null
-
-    st_result_json "$dl" "$ul" > "$ST_T/result.json" 2>/dev/null
-    if [[ -s "$ST_T/result.json" ]] && mkdir -p "$ST_HISTORY_DIR" 2>/dev/null; then
-        ST_SAVED="$ST_HISTORY_DIR/$(date +%Y%m%d-%H%M%S).json"
-        cp "$ST_T/result.json" "$ST_SAVED" 2>/dev/null || ST_SAVED=""
-        # имена — время замера, по ним и сортируем; храним 100 последних
-        local old=("$ST_HISTORY_DIR"/*.json)
-        ((${#old[@]} > 100)) && rm -f "${old[@]:0:${#old[@]}-100}"
-    fi
-
-    if [[ -n "$json" ]]; then
-        cat "$ST_T/result.json"
-    elif [[ -z "$plain" ]]; then
-        local frame; frame=$(st_render "$dl" "$ul" yes)
-        printf '\033[H%s\033[J' "${frame//$'\n'/$'\033[K\n'}"
-        printf ' %sq / Enter — выход%s' "$C_GRAY" "$C_RESET"
-        read -rsn1 key </dev/tty 2>/dev/null
+        if [[ "$act" == restart ]]; then rm -rf "$ST_T"; continue; fi
         printf '\033[?25h\033[?1049l'
         st_render "$dl" "$ul" yes
-    else
-        st_render "$dl" "$ul" yes
-    fi
+        break
+    done
     trap - INT TERM
     rm -rf "$ST_T"
 }

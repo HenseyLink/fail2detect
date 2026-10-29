@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest update; do
+for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest bench update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -93,7 +93,10 @@ ${C_BOLD}Сеть${C_RESET}
   speed [--quick]           Cloudflare Speedtest: живой дашборд (скорость, задержка
                             в простое и под нагрузкой, потери UDP, Bufferbloat, стабильность)
   speed --plain | --json    без дашборда: итог текстом / JSON
-  speed history             история замеров
+  speed history             история замеров (в дашборде: A автосохранение, R заново, H история)
+  bench [ru|world] [--ping] [--quick] [--threads N] [--ookla|--iperf] [--json]
+                            бенчмарк: скорость и пинг до провайдеров России (iperf3)
+                            и зарубежа (Ookla, как bench.sh, или iperf3)
 
 ${C_BOLD}Прочее${C_RESET}
   config <KEY> [VALUE]      показать/изменить параметр
@@ -281,6 +284,23 @@ menu_node() {
     done
 }
 
+menu_bench() {
+    banner
+    echo "  ${C_BOLD}Бенчмарк сети${C_RESET}"
+    menu_item 1 "Всё: Россия + зарубеж"
+    menu_item 2 "Только Россия"
+    menu_item 3 "Только зарубеж"
+    menu_item 4 "Только пинг (быстро)"
+    menu_item 5 "Cloudflare Speedtest (дашборд)"
+    menu_item 0 "Назад"
+    ask "Выбор" ""
+    case "$REPLY" in
+        1) bench_run;; 2) bench_run ru;; 3) bench_run world;; 4) bench_run --ping;; 5) speedtest_run; return;;
+        *) return;;
+    esac
+    pause
+}
+
 menu_balancer() {
     balancer_status
     echo
@@ -336,6 +356,7 @@ menu_main() {
         menu_item 9 "Cloudflare Speedtest"
         menu_item 10 "Установка панели / ноды / подписки"
         menu_item 11 "Обновления: fail2detect и Remnawave$([[ -n "${F2D_NEW_VERSION:-}" ]] && echo " ${C_YELLOW}(есть $F2D_NEW_VERSION)${C_RESET}")"
+        menu_item 12 "Бенчмарк сети: Россия и зарубеж (скорость, пинг)"
         menu_item 0 "Выход"
         ask "Выбор" ""
         case "$REPLY" in
@@ -350,6 +371,7 @@ menu_main() {
             9) speedtest_run; pause;;
             10) menu_install;;
             11) menu_updates;;
+            12) menu_bench;;
             0|q) exit 0;;
         esac
     done
@@ -426,6 +448,7 @@ main() {
                         *) die "node add|transport|add-transport|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
+        bench|benchmark) bench_run "$@";;
         geo|geocheck) geocheck_run "${1:-}";;
         ipquality|ipq) ipquality_run "${1:-}";;
         speed|speedtest)
