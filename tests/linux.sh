@@ -674,6 +674,36 @@ printf 'services:\n  nginx:\n    image: nginx\n' > "$DT/opt/remnawave/docker-com
 [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "чужой compose в каталоге — не панель" || fail "чужой compose" "$(det)"
 unset CT
 
+section "API панели: локальный адрес и повторы"
+CURL_LOG="$WORK/curl-api.log"
+_api_curl() {   # заглушка curl: коды ответа по очереди из $CURL_RC (файл), URL — в лог
+    local a url="" ; for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
+    if [[ "$url" == */api/auth/status ]]; then [[ "${LOCAL_UP:-yes}" == yes ]]; return; fi
+    echo "$url" >> "$CURL_LOG"
+    local rc; rc=$(head -1 "$CURL_RC"); sed -i.bak '1d' "$CURL_RC" 2>/dev/null
+    [[ -z "$rc" || "$rc" == 0 ]] && { echo '{"response":{"uuid":"ok"}}'; return 0; }
+    echo "curl: ($rc) Failed to connect to panel.example port 443: Couldn't connect to server" >&2; return "$rc"
+}
+api_case() {   # has_panel(yes|no) метод коды… → «URL-запросов|ответ|ошибка»
+    ( local hp="$1" m="$2"; shift 2
+      printf '%s\n' "$@" > "$CURL_RC"; : > "$CURL_LOG"
+      source "$ROOT/lib/remnawave.sh"
+      curl() { _api_curl "$@"; }; has_panel() { [[ "$hp" == yes ]]; }; sleep() { :; }; warn() { :; }
+      rw_token() { echo tok; }; RW_API_URL="https://panel.example"; RW_API_COOKIE=""; _RW_LOCAL=""
+      out=$(rw_api "$m" /api/config-profiles '{"a":1}' 2>/dev/null); rc=$?
+      echo "$(wc -l < "$CURL_LOG" | tr -d ' ')|$(head -1 "$CURL_LOG")|${out:0:10}|$rc" )
+}
+CURL_RC="$WORK/curl-rc"
+[[ "$(api_case yes PATCH 0)" == "1|http://127.0.0.1:3000/api/config-profiles|"*"|0" ]] && pass "сервер панели — запросы в 127.0.0.1:3000, не через домен" || fail "локальный API" "$(api_case yes PATCH 0)"
+[[ "$(api_case no PATCH 0)" == "1|https://panel.example/api/config-profiles|"* ]] && pass "другой сервер — через RW_API_URL" || fail "удалённый API" "$(api_case no PATCH 0)"
+[[ "$(api_case no PATCH 7 7 0)" == "3|"*'|{"response|0' ]] && pass "нет соединения (перезапуск Xray) — PATCH повторяется и проходит" || fail "повтор PATCH" "$(api_case no PATCH 7 7 0)"
+[[ "$(api_case no PATCH 56 0)" == "1|"*"|56" ]] && pass "обрыв после отправки — PATCH не повторяется (без дублей)" || fail "PATCH 56" "$(api_case no PATCH 56 0)"
+[[ "$(api_case no GET 28 0 0)" == "2|"* ]] && pass "чтение повторяется и при таймауте" || fail "повтор GET" "$(api_case no GET 28 0 0)"
+r_err=$( (printf '%s\n' 7 7 7 7 7 7 7 > "$CURL_RC"; source "$ROOT/lib/remnawave.sh"
+    curl() { _api_curl "$@"; }; has_panel() { false; }; sleep() { :; }; warn() { :; }; rw_token() { echo tok; }
+    RW_API_URL="https://panel.example"; _RW_LOCAL=""; rw_api PATCH /x '{}' >/dev/null 2>&1; echo "$RW_API_ERROR") )
+[[ "$r_err" == *"Couldn't connect"* ]] && pass "причина ошибки сохраняется (RW_API_ERROR)" || fail "RW_API_ERROR" "$r_err"
+
 section "Российский трафик: выбор профилей"
 RU_API_LOG="$WORK/ru-api.log"
 _ru_api() {

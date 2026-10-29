@@ -229,7 +229,8 @@ node_ru_traffic() {   # block|direct|off|status|update [--ripe|--no-ripe] [--pro
             ok "«${n}»: $(ru_policy_label "$pol")$([[ "$use_ripe" == yes && "$pol" != off ]] && echo " + сети RIPE") — панель разошлёт конфиг на ноды"
             done_names+=("$n")
         else
-            err "«${n}» не обновлён: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
+            if [[ -z "$r" ]]; then err "«${n}» не обновлён: панель не ответила${RW_API_ERROR:+ ($RW_API_ERROR)} — повторите для этого профиля: f2d node ru-traffic $pol --profile \"$n\""
+            else err "«${n}» не обновлён: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
         fi
     done <<<"$profiles"
     rm -f "$pfx"

@@ -53,18 +53,56 @@ rw_token() {
 # больше 128 КБ и не помещается в аргумент jq (Linux: «Argument list too long»)
 rw_profile_body() { jq -c --arg u "$1" '{uuid: $u, config: .}'; }
 
+# Куда слать запросы. На сервере самой панели — напрямую в 127.0.0.1:3000: через
+# домен запрос идёт по 443, а его у панели «всё в одном» держит Xray локальной
+# ноды. Правка профиля этой ноды перезапускает Xray, и следующие запросы через
+# домен падают («Couldn't connect to server»). Локальный API этого не замечает.
+rw_base_url() {
+    if [[ -z "${_RW_LOCAL:-}" ]]; then
+        _RW_LOCAL=no
+        if has_panel && curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:3000/api/auth/status \
+            -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' 2>/dev/null; then _RW_LOCAL=yes; fi
+    fi
+    if [[ "$_RW_LOCAL" == yes ]]; then echo "http://127.0.0.1:3000"; else echo "${RW_API_URL%/}"; fi
+}
+
 rw_api() {
-    local method="$1" path="$2" data="${3:-}" token hdr
+    local method="$1" path="$2" data="${3:-}" token hdr base
     token=$(rw_token) || return 1
     rw_normalize_url
+    base=$(rw_base_url)
     hdr=$(printf 'Authorization: Bearer %s\nContent-Type: application/json\nX-Forwarded-For: 127.0.0.1\nX-Forwarded-Proto: https\n' "$token")
-    [[ -n "${RW_API_COOKIE:-}" ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
+    [[ -n "${RW_API_COOKIE:-}" && "$base" != http://127.0.0.1:3000 ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
     local ct="${F2D_API_CONNECT_TIMEOUT:-10}" mt="${F2D_API_MAX_TIME:-60}"
-    if [[ -n "$data" ]]; then
-        printf '%s' "$data" | curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr") --data-binary @-
+    local try out rc errf; errf=$(mktemp)
+    # Повтор, если панель на миг недоступна (перезапуск Xray/nginx после правки профиля).
+    # Изменяющие запросы повторяем только когда соединения не было вовсе (6, 7) —
+    # тогда запрос точно не дошёл; чтение — и при обрыве ответа.
+    for try in 1 2 3 4 5 6 7; do
+        rc=0
+        if [[ -n "$data" ]]; then
+            out=$(printf '%s' "$data" | curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "$base$path" -H @<(printf '%s' "$hdr") --data-binary @- 2>"$errf") || rc=$?
+        else
+            out=$(curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "$base$path" -H @<(printf '%s' "$hdr") </dev/null 2>"$errf") || rc=$?
+        fi
+        case "$rc" in
+            6|7) ;;
+            28|35|52|56) [[ "$method" == GET ]] || break;;
+            *) break;;
+        esac
+        ((try == 7)) && break
+        ((try == 1)) && warn "Панель не отвечает ($(head -1 "$errf" | sed 's/^curl: ([0-9]*) //')) — жду и повторяю…"
+        sleep 5
+    done
+    if ((rc != 0)); then
+        RW_API_ERROR=$(head -1 "$errf" | sed 's/^curl: ([0-9]*) //')
+        echo "${RW_API_ERROR:-curl: код $rc}" >&2
     else
-        curl -sS --connect-timeout "$ct" --max-time "$mt" -X "$method" "${RW_API_URL%/}$path" -H @<(printf '%s' "$hdr") </dev/null
+        RW_API_ERROR=""
     fi
+    rm -f "$errf"
+    printf '%s' "$out"
+    return "$rc"
 }
 
 # Проверка API с диагнозом: печатает "код|число_профилей" (код 000 — нет соединения)
@@ -72,11 +110,12 @@ rw_probe() {
     local token hdr out code
     token=$(F2D_NO_PROMPT=1 rw_token) || { echo "notoken|0"; return; }
     hdr=$(printf 'Authorization: Bearer %s\nX-Forwarded-For: 127.0.0.1\nX-Forwarded-Proto: https\n' "$token")
-    [[ -n "${RW_API_COOKIE:-}" ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
+    local base; base=$(rw_base_url)   # на сервере панели — локальный API (см. rw_base_url)
+    [[ -n "${RW_API_COOKIE:-}" && "$base" != http://127.0.0.1:3000 ]] && hdr+=$'\n'"Cookie: ${RW_API_COOKIE}"
     out=$(mktemp)
     local rc=0
     code=$(curl -sS -o "$out" -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-        "${RW_API_URL%/}/api/config-profiles" -H @<(printf '%s' "$hdr") </dev/null 2>/dev/null) || rc=$?
+        "$base/api/config-profiles" -H @<(printf '%s' "$hdr") </dev/null 2>/dev/null) || rc=$?
     if [[ -z "$code" || "$code" == 000 ]]; then
         case "$rc" in
             52|56) code=444;;   # соединение закрыто без ответа — так nginx панели отвечает без ключа входа
