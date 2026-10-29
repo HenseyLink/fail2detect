@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -663,6 +663,56 @@ CT=""; [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && 
 printf 'services:\n  nginx:\n    image: nginx\n' > "$DT/opt/remnawave/docker-compose.yml"
 [[ "$(det)" == "не найдено|/opt/remnawave|/opt/remnanode" ]] && pass "чужой compose в каталоге — не панель" || fail "чужой compose" "$(det)"
 unset CT
+
+section "Панель после переноса"
+st_lc_saved="${LC_ALL:-}"; export LC_ALL=C.UTF-8
+PD="$WORK/paneldir"; mkdir -p "$PD"; printf 'PANEL_DOMAIN=panel.example\n' > "$PD/.env"
+# shellcheck disable=SC2031  # RW_PANEL_DIR меняется и в подоболочках det() выше — здесь своя копия
+SAVED_PANEL_DIR="$RW_PANEL_DIR"; RW_PANEL_DIR="$PD"
+F2D_WEB_ENV="$WORK/web-none.env"; : > "$F2D_WEB_ENV"
+# shellcheck disable=SC2016  # буквальный конфиг nginx
+printf 'map $http_cookie $auth_cookie {\n    default 0;\n    "~*AbcDef12=XyZ987qw" 1;\n}\n' > "$PD/nginx.conf"
+[[ "$(panel_login_link)" == "https://panel.example/auth/login?AbcDef12=XyZ987qw" ]] && pass "ссылка входа из nginx.conf установщика eGames" || fail "eGames nginx" "$(panel_login_link)"
+rm "$PD/nginx.conf"; printf '@unauth {\n    not header Cookie *k1=v2*\n    query k1=v2\n}\n' > "$PD/Caddyfile"
+[[ "$(panel_login_link)" == "https://panel.example/auth/login?k1=v2" ]] && pass "ссылка входа из Caddyfile" || fail "Caddy" "$(panel_login_link)"
+rm "$PD/Caddyfile"
+printf 'PANEL_DOMAIN="panel.example"\nPANEL_KEY_NAME="kn"\nPANEL_KEY_VALUE="kv"\nWEB_PORT="443"\n' > "$F2D_WEB_ENV"
+[[ "$(panel_login_link)" == "https://panel.example/auth/login?kn=kv" ]] && pass "ссылка входа fail2detect (web.env)" || fail "web.env" "$(panel_login_link)"
+out=$(panel_access_info restored 2>&1)
+grep -q 'прежние' <<<"$out" && grep -q 'не меняются' <<<"$out" && pass "без panel-admin.txt — «логин и пароль прежние»" || fail "прежние" "$out"
+printf 'login=admin7\npassword=S3cret!\n' > "$F2D_CONF_DIR/panel-admin.txt"
+out=$(panel_access_info 2>&1); grep -q 'admin7' <<<"$out" && grep -q 'S3cret!' <<<"$out" && pass "с panel-admin.txt — логин и пароль" || fail "panel-admin" "$out"
+rm -f "$F2D_CONF_DIR/panel-admin.txt"
+# нода на этом же сервере: шлюз docker другой — адрес в панели исправляется, UFW пускает docker-сеть
+API_LOG="$WORK/api-panel.log"; : > "$API_LOG"; UFW_LOG="$WORK/ufw-panel.log"; : > "$UFW_LOG"
+docker() { case "$*" in
+    *"Gateway"*) echo "172.18.0.1 172.18.0.5";; *"IPPrefixLen"*) echo "172.18.0.5/16";;
+    "inspect remnawave -f {{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}}{{end}}") echo remnawave-network;;
+    *"network inspect"*) echo "172.18.0.0/16";; esac; }
+rw_api() { echo "$*" >> "$API_LOG"; case "$1 $2" in
+    "GET /api/nodes") echo '{"response":[{"uuid":"n1","name":"local","address":"172.30.0.1","port":2222},{"uuid":"n2","name":"de","address":"203.0.113.5","port":2222}]}';;
+    "GET /api/nodes/n1") echo '{"response":{"isConnected":true}}';;
+    "PATCH /api/nodes"*) echo '{"response":{"uuid":"n1"}}';; esac; }
+has_node() { true; }; ufw_active() { true; }; ufw() { echo "ufw $*" >> "$UFW_LOG"; }; NODE_API_PORT=2222; sleep() { :; }
+panel_fix_local_node >/dev/null 2>&1
+grep -q 'PATCH /api/nodes {"uuid":"n1","address":"172.18.0.1"}' "$API_LOG" && ! grep -q '"n2"' "$API_LOG" && pass "локальная нода: 172.30.0.1 → шлюз 172.18.0.1, внешние ноды не тронуты" || fail "адрес локальной ноды" "$(cat "$API_LOG")"
+grep -q 'allow proto tcp from 172.18.0.0/16 to any port 2222' "$UFW_LOG" && pass "UFW: API ноды открыт для docker-сети панели" || fail "UFW docker" "$(cat "$UFW_LOG")"
+unset -f docker rw_api has_node ufw_active ufw sleep
+RW_PANEL_DIR="$SAVED_PANEL_DIR"
+# перенос: все ssh/scp — через одно подключение (пароль один раз), у scp порт — -P
+SSH_LOG="$WORK/ssh.log"; : > "$SSH_LOG"
+ssh() { echo "ssh $*" >> "$SSH_LOG"; }; scp() { echo "scp $*" >> "$SSH_LOG"; }
+backup_create() { BACKUP_LAST="$WORK/panel-x.tar"; touch "$BACKUP_LAST"; }
+require_root() { :; }; have() { true; }; confirm() { [[ "$1" == Начать* ]]; }; curl() { echo 198.51.100.1; }
+F2D_BACKUP_DIR="$WORK/mig"; panel_migrate --to root@203.0.113.9 -p 2202 < <(echo y) >/dev/null 2>&1
+n_ssh=$(grep -c '^ssh ' "$SSH_LOG"); n_ctl=$(grep -c 'ControlPath=' "$SSH_LOG")
+[[ "$n_ssh" -ge 3 && "$n_ctl" == "$(wc -l < "$SSH_LOG" | tr -d ' ')" ]] && pass "перенос: все $(wc -l < "$SSH_LOG" | tr -d ' ') вызова ssh/scp — через ControlMaster" || fail "ControlMaster" "$(cat "$SSH_LOG")"
+grep -q '^scp -P 2202 ' "$SSH_LOG" && ! grep -q '^scp -p ' "$SSH_LOG" && pass "scp получает порт как -P" || fail "scp -P" "$(grep ^scp "$SSH_LOG")"
+grep -q -- '-O exit' "$SSH_LOG" && pass "мастер-подключение закрывается в конце" || fail "ssh -O exit"
+unset -f ssh scp backup_create require_root have confirm curl
+source "$ROOT/lib/common.sh"; source "$ROOT/lib/backup.sh"; load_config
+F2D_BACKUP_DIR="${F2D_STATE_DIR}/backup"
+if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help

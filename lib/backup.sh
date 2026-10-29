@@ -371,11 +371,16 @@ _backup_restore() {   # каталог_распаковки аргументы�
     if [[ -n "$PANEL_DOMAIN$SUB_DOMAIN$SELFSTEAL_DOMAIN" ]] && ! docker ps --format '{{.Names}}' | grep -qx remnawave-nginx; then
         web_apply || warn "nginx не поднялся — проверьте сертификаты: fail2detect cert list"
     fi
+    config_set RW_API_URL "http://127.0.0.1:3000" >/dev/null
     if compose_file "$RW_NODE_DIR" >/dev/null && jq -e '.paths | index("/opt/remnanode")' "$m" >/dev/null; then
         { [[ -n "$yes" ]] || confirm "В копии есть нода этого сервера — запустить её здесь?" y; } && (cd "$RW_NODE_DIR" && docker compose up -d >/dev/null 2>&1) && ok "Нода запущена"
     fi
-    config_set RW_API_URL "http://127.0.0.1:3000" >/dev/null
+    # нода на этом же сервере: адрес шлюза docker и доступ панели к её API на новом месте
+    _RW_CT_DONE=""; rw_locate
+    panel_fix_local_node
     audit_write RESTORE - - - "панель из $(basename "$f")"
+    panel_access_info restored
+    panel_check || true
     _bk_after_move "$from" "$yes"
 }
 
@@ -423,19 +428,25 @@ panel_migrate() {   # --to user@host [-p порт]
     echo "  4. IP панели на нодах, остановка панели здесь"
     echo
     confirm "Начать?" y || return 1
-    local ssh_opts=(-p "$port" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+    # одно SSH-подключение на весь перенос: пароль спрашивается один раз,
+    # остальные ssh/scp идут через него (ControlMaster)
+    local ctl; ctl="$(mktemp -d)/ctl"
+    local ssh_opts=(-p "$port" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15
+        -o ControlMaster=auto -o "ControlPath=$ctl" -o ControlPersist=10m)
+    info "Подключаюсь к $to (пароль, если нужен, — один раз)…"
     ssh "${ssh_opts[@]}" "$to" true || die "Нет SSH-доступа к $to"
+
     local tmp; tmp=$(mktemp -d)
     # по SSH копия идёт зашифрованным каналом — пароль на файл не нужен
     backup_create --out "$tmp" --no-password --quiet || { rm -rf "$tmp"; die "Копия не создана"; }
     local f="$BACKUP_LAST" name; name=$(basename "$f")
     ok "Копия: $(_bk_human "$(wc -c < "$f")")"
-    info "Ставлю fail2detect на $to (если нет)…"
+    info "Ставлю (или обновляю) fail2detect на ${to}…"
     # shellcheck disable=SC2029  # F2D_REPO — намеренно с этой стороны
-    ssh "${ssh_opts[@]}" "$to" "command -v fail2detect >/dev/null || bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)\" -- --no-setup" \
+    ssh "${ssh_opts[@]}" "$to" "if command -v fail2detect >/dev/null; then fail2detect update >/dev/null; else bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)\" -- --no-setup; fi" \
         || { rm -rf "$tmp"; die "Не удалось установить fail2detect на $to"; }
     info "Передаю копию…"
-    scp -P "$port" -o StrictHostKeyChecking=accept-new "$f" "$to:/root/$name" || { rm -rf "$tmp"; die "Копия не передана"; }
+    scp "${ssh_opts[@]/#-p/-P}" "$f" "$to:/root/$name" || { rm -rf "$tmp"; die "Копия не передана"; }
     # на старом сервере копию тоже оставляем
     mkdir -p "$F2D_BACKUP_DIR"; mv "$f" "$F2D_BACKUP_DIR/" 2>/dev/null; rm -rf "$tmp"
     local old_ip; old_ip=$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null)
@@ -449,6 +460,7 @@ panel_migrate() {   # --to user@host [-p порт]
     if confirm "Остановить панель на ЭТОМ (старом) сервере? Данные останутся" y; then
         (cd "$RW_PANEL_DIR" && docker compose stop >/dev/null 2>&1) && ok "Старая панель остановлена (запустить снова: cd $RW_PANEL_DIR && docker compose start)"
     fi
+    ssh -o "ControlPath=$ctl" -O exit "$to" >/dev/null 2>&1; rm -rf "$(dirname "$ctl")"
     audit_write MIGRATE - - - "панель → $to"
 }
 

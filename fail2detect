@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup setup ipquality geocheck speedtest bench censorcheck update; do
+for _m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -95,6 +95,7 @@ ${C_BOLD}Резервные копии и перенос панели${C_RESET}
   backup restore <копия> [--panel-domain D] [--sub-domain D]   восстановить на этом сервере
   backup schedule daily|weekly|off [--keep N] [--telegram]     автокопии по таймеру
   panel migrate --to root@<новый сервер>   перенести панель целиком (копия → SSH → восстановление)
+  panel check | fix | url   почему панель не открывается / починить ноду на этом сервере / ссылка входа
   node panel-ip <IP> [--replace <старый>]  на ноде: пустить новую панель после переноса
   node ru-traffic block|direct|off|status|update [--ripe] [--profile ИМЯ]
                             российский трафик на нодах (профили панели): блок или напрямую;
@@ -502,9 +503,12 @@ main() {
         migrate) panel_migrate "$@";;
         panel)      case "${1:-}" in
                         migrate) shift; panel_migrate "$@";;
+                        check) panel_check;;
+                        fix) panel_fix;;
+                        url|info|login) panel_access_info;;
                         backup) shift; backup_create "$@";;
                         restore) shift; backup_restore "$@";;
-                        *) die "panel migrate --to root@сервер | panel backup | panel restore <копия>";;
+                        *) die "panel check | fix | url | migrate --to root@сервер | backup | restore <копия>";;
                     esac;;
         censor|censorcheck|dpi) censorcheck_run "$@";;
         geo|geocheck) geocheck_run "${1:-}";;

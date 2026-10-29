@@ -130,6 +130,11 @@ doctor() {
         else _chk bad "Сайт-маскировка $SELFSTEAL_DOMAIN не отвечает как обычный сайт" "fail2detect web check"; fi
     fi
 
+    if has_panel; then
+        if panel_check >/dev/null 2>&1; then _chk ok "Панель открывается (контейнеры, API, 443, DNS, страница входа)"
+        else _chk bad "С панелью проблемы" "fail2detect panel check"; fi
+    fi
+
     title "Фаервол"
     if nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1; then _chk ok "Таблица fail2detect загружена"
     else _chk bad "Таблица fail2detect не загружена" "fail2detect fw apply"; fi
