@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality geocheck speedtest bench censorcheck update; do
+for _m in common detect firewall jail transport certs site web remnawave balancer installer remove setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -86,6 +86,9 @@ ${C_BOLD}Сертификаты${C_RESET}
 
 ${C_BOLD}Веб (nginx панели/подписки/selfsteal)${C_RESET}
   web apply | show | url    применить / показать конфиг / ссылка входа в панель
+  web check                 проверить сайт-маскировку (selfsteal): сокет, Reality-порты, 443, 80
+  web selfsteal <домен>     починить сайт-маскировку на работающей ноде (без переустановки)
+  web site [regen]          сайт-маскировка: где лежит / сгенерировать новый
 
 ${C_BOLD}Сеть${C_RESET}
   geo [--full]              GeoCheck: в какой стране IP видят сервисы, CDN и гео-базы (IPv4/IPv6)
@@ -401,7 +404,17 @@ main() {
         web)        require_root
                     case "${1:-apply}" in
                         apply) web_apply;; show) web_render;; url) panel_login_url;;
-                        *) die "web apply|show|url";;
+                        check) web_selfsteal_check "${2:-}";;
+                        selfsteal) web_selfsteal_setup "${2:-}";;
+                        site) web_load
+                              case "${2:-}" in
+                                  regen|new) site_generate "$F2D_WEB_ROOT" --force && ok "Новый сайт-маскировка: «${SITE_NAME}»" && web_apply;;
+                                  --port443) web_set WEB_PORT 443; web_apply;;
+                                  *) info "Сайт: $F2D_WEB_ROOT ($(grep -o '<title>[^<]*' "$F2D_WEB_ROOT/index.html" 2>/dev/null | head -1 | sed 's/<title>//'))"
+                                     echo "  свой сайт: положите файлы в $F2D_WEB_ROOT (index.html — главная, 404.html — ошибка)"
+                                     echo "  новый случайный: fail2detect web site regen";;
+                              esac;;
+                        *) die "web apply|show|url|check|selfsteal <домен>|site [regen|--port443]";;
                     esac;;
         acme)       require_root; acme_hook "${1:?pre|post|deploy}";;
         remove)     remove_cli "$@";;

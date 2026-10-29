@@ -11,9 +11,10 @@ F2D_WEB_DIR="/opt/fail2detect-web"
 F2D_WEB_CONTAINER="f2d-nginx"
 F2D_WEB_ENV="${F2D_CONF_DIR}/web.env"
 F2D_WEB_ROOT="/var/www/fail2detect"
+F2D_ACME_ROOT="/var/www/acme"
 
 web_load() {
-    PANEL_DOMAIN=""; SUB_DOMAIN=""; SELFSTEAL_DOMAIN=""; WEB_PORT=""; PANEL_KEY_NAME=""; PANEL_KEY_VALUE=""
+    PANEL_DOMAIN=""; SUB_DOMAIN=""; SELFSTEAL_DOMAIN=""; WEB_PORT=""; WEB_HTTP=""; PANEL_KEY_NAME=""; PANEL_KEY_VALUE=""
     # shellcheck disable=SC1090
     [[ -f "$F2D_WEB_ENV" ]] && source "$F2D_WEB_ENV"
     return 0
@@ -136,7 +137,33 @@ $(_web_listen)
 $(_web_ssl "$SELFSTEAL_DOMAIN")
     root /var/www/html;
     index index.html;
-    location / { try_files \$uri \$uri/ /index.html; }
+    # как у обычного сайта: настоящие страницы и настоящий 404, а не одна страница на любой адрес
+    error_page 404 /404.html;
+    location / { try_files \$uri \$uri/ =404; }
+    location = /404.html { internal; }
+    location /assets/ { expires 7d; add_header Cache-Control "public"; }
+    location = /favicon.ico { try_files /favicon.svg =404; }
+}
+
+EOF
+    fi
+    if [[ "$WEB_HTTP" == yes ]]; then
+        local names="" d; for d in "$PANEL_DOMAIN" "$SUB_DOMAIN" "$SELFSTEAL_DOMAIN"; do [[ -n "$d" ]] && names+="$d "; done
+        cat <<EOF
+# HTTP: ACME (выпуск сертификатов без остановки nginx) и переход на HTTPS — как у любого сайта
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names% };
+    location /.well-known/acme-challenge/ { root ${F2D_ACME_ROOT}; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    location /.well-known/acme-challenge/ { root ${F2D_ACME_ROOT}; }
+    location / { return 444; }
 }
 
 EOF
@@ -151,32 +178,13 @@ $(_web_listen default_server)
 EOF
 }
 
-# простой нейтральный сайт-заглушка для selfsteal
-web_site_generate() {
-    [[ -f "$F2D_WEB_ROOT/index.html" ]] && return 0
-    local names=("Northwind Studio" "Bluefield Labs" "Arcadia Design" "Lumen Works" "Cedar Analytics" "Harbor Media")
-    local name="${names[RANDOM % ${#names[@]}]}" year; year=$(date +%Y)
-    mkdir -p "$F2D_WEB_ROOT"
-    cat > "$F2D_WEB_ROOT/index.html" <<EOF
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${name}</title>
-<style>
-body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1d2433;background:#f6f7fb}
-header{padding:28px 8vw;display:flex;justify-content:space-between;align-items:center}
-header b{font-size:20px} nav a{margin-left:22px;color:#4a5568;text-decoration:none}
-main{padding:12vh 8vw 10vh;max-width:760px}
-h1{font-size:44px;line-height:1.1;margin:0 0 18px} p{font-size:18px;color:#4a5568;line-height:1.6}
-.btn{display:inline-block;margin-top:22px;padding:12px 22px;border-radius:8px;background:#2b4acb;color:#fff;text-decoration:none}
-footer{padding:28px 8vw;color:#8a94a6;font-size:14px}
-</style></head>
-<body><header><b>${name}</b><nav><a href="#">Services</a><a href="#">Work</a><a href="#">Contact</a></nav></header>
-<main><h1>We build calm, reliable software.</h1>
-<p>Product design, engineering and data for teams that care about the details. Our new website is on its way.</p>
-<a class="btn" href="#">Get in touch</a></main>
-<footer>&copy; ${year} ${name}</footer></body></html>
-EOF
+# порт 80 у nginx: свободен или уже наш
+_web_http_possible() {
+    ss -H -tln '( sport = :80 )' 2>/dev/null | grep -q . || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$F2D_WEB_CONTAINER" && ss -H -tlnp '( sport = :80 )' 2>/dev/null | grep -q '"nginx"'
 }
+
+web_site_generate() { site_generate "$F2D_WEB_ROOT"; }
 
 web_apply() {
     require_docker
@@ -186,11 +194,15 @@ web_apply() {
         return 1
     fi
     web_load
-    mkdir -p "$F2D_WEB_DIR"
+    mkdir -p "$F2D_WEB_DIR" "$F2D_ACME_ROOT"
     web_site_generate
+    # HTTP (80): только если есть что отдавать и порт не занят чужим
+    if [[ -n "$PANEL_DOMAIN$SUB_DOMAIN$SELFSTEAL_DOMAIN" && "${WEB_HTTP_OFF:-}" != yes ]] && _web_http_possible; then WEB_HTTP=yes; else WEB_HTTP=""; fi
+    web_set WEB_HTTP "$WEB_HTTP"
     local conf; conf=$(web_render) || return 1
     printf '%s\n' "$conf" > "$F2D_WEB_DIR/nginx.conf.new"
-    if [[ ! -f "$F2D_WEB_DIR/docker-compose.yml" ]]; then
+    # compose — наш файл, переписываем всегда (новые тома у старых установок)
+    if true; then
         cat > "$F2D_WEB_DIR/docker-compose.yml" <<EOF
 services:
   f2d-nginx:
@@ -204,6 +216,7 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /dev/shm:/dev/shm:rw
       - ${F2D_WEB_ROOT}:/var/www/html:ro
+      - ${F2D_ACME_ROOT}:${F2D_ACME_ROOT}:ro
     logging:
       driver: json-file
       options: { max-size: 20m, max-file: "3" }
@@ -217,7 +230,76 @@ EOF
         err "nginx отверг конфиг:"; tail -5 "$F2D_WEB_DIR/nginx.err" >&2; return 1
     fi
     (cd "$F2D_WEB_DIR" && docker compose up -d >/dev/null 2>&1) || { err "nginx не запустился"; return 1; }
+    # порты, на которых сайт открывается напрямую
+    if [[ "$WEB_HTTP" == yes ]]; then list_add PUBLIC_TCP 80; ufw_allow 80 tcp "" "fail2detect web"; fi
+    if [[ -n "$WEB_PORT" ]]; then list_add PUBLIC_TCP "$WEB_PORT"; ufw_allow "$WEB_PORT" tcp "" "fail2detect web"; fi
+    fw_apply >/dev/null 2>&1
     docker exec "$F2D_WEB_CONTAINER" nginx -s reload >/dev/null 2>&1
     local i; for i in $(seq 1 10); do [[ -S "$NGINX_SOCK" ]] && break; sleep 1; done
-    ok "nginx обновлён${WEB_PORT:+ (порт $WEB_PORT)}"
+    ok "nginx обновлён${WEB_PORT:+ (порт $WEB_PORT)}$([[ "$WEB_HTTP" == yes ]] && echo ", HTTP 80 → HTTPS")"
+}
+
+# починить/настроить маскировку на уже работающей ноде, без переустановки
+web_selfsteal_setup() {   # домен
+    local dom="$1"
+    [[ -n "$dom" ]] || die "fail2detect web selfsteal <домен ноды>"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
+        die "Сайт здесь отдаёт nginx установщика (remnawave-nginx) — настраивайте его там"
+    fi
+    web_load
+    cert_ensure "$dom" || die "Не удалось получить сертификат для $dom"
+    web_set SELFSTEAL_DOMAIN "$dom"
+    if [[ -z "$WEB_PORT" && ",$(fw_xray_ports tcp)," != *",443,"* ]] && ! ss -H -tln '( sport = :443 )' 2>/dev/null | grep -q .; then
+        web_set WEB_PORT 443
+    fi
+    web_apply || return 1
+    web_selfsteal_check "$dom"
+}
+
+# ---------- проверка сайта-маскировки ----------
+# Проверяет то же, что увидит сканер: nginx за сокетом (как его зовёт Reality),
+# Reality-порты Xray (неавторизованный TLS → сайт), прямой 443 и HTTP → HTTPS.
+web_selfsteal_check() {   # [домен]
+    web_load
+    local dom="${1:-$SELFSTEAL_DOMAIN}" code body bad=0 p any=no
+    [[ -n "$dom" ]] || { warn "Selfsteal-домен не задан: fail2detect web selfsteal <домен ноды>"; return 1; }
+    title "Сайт-маскировка: $dom"
+    body=$(mktemp)
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
+        info "Сайт отдаёт nginx установщика (remnawave-nginx) — fail2detect его не трогает"
+    fi
+    # 1) nginx через unix-сокет с PROXY protocol — так подключается Reality
+    if [[ -S "$NGINX_SOCK" ]]; then
+        code=$(curl -sk --max-time 6 --unix-socket "$NGINX_SOCK" --haproxy-protocol -o "$body" -w '%{http_code}' "https://$dom/" 2>/dev/null)
+        if [[ "$code" == 200 ]]; then ok "nginx за сокетом отдаёт сайт «$(grep -o '<title>[^<]*' "$body" | head -1 | sed 's/<title>//')»"
+        else err "nginx за сокетом ответил ${code:-ничего} — нет server-блока для $dom (исправить: fail2detect web selfsteal $dom)"; bad=1; fi
+        code=$(curl -sk --max-time 6 --unix-socket "$NGINX_SOCK" --haproxy-protocol -o /dev/null -w '%{http_code}' "https://$dom/f2d-$RANDOM-nope" 2>/dev/null)
+        [[ "$code" == 404 ]] && ok "Несуществующая страница — настоящий 404" || warn "Несуществующая страница отвечает $code (у обычного сайта — 404)"
+    else
+        err "Нет сокета $NGINX_SOCK — nginx не запущен"; bad=1
+    fi
+    # 2) через Xray: неавторизованный TLS на Reality-порту должен получить сайт с настоящим сертификатом
+    local xp; xp=$(fw_xray_ports tcp 2>/dev/null); [[ -n "$xp" ]] || xp=$(detect_xray_ports)
+    for p in ${xp//,/ }; do
+        code=$(curl -s --max-time 8 --resolve "$dom:$p:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$dom:$p/" 2>/dev/null); local rc=$?
+        if [[ "$code" == 200 ]]; then ok "Порт $p (Reality): браузер видит сайт, сертификат $dom настоящий"; any=yes
+        elif ((rc == 60)); then warn "Порт $p: сайт есть, но сертификат не подходит к $dom"
+        fi
+    done
+    [[ "$any" == yes ]] || { err "Ни один порт Xray не отдаёт сайт — проверьте target Reality ($NGINX_SOCK, xver 1) и serverNames ($dom)"; bad=1; }
+    # 3) прямой HTTPS на WEB_PORT и HTTP → HTTPS
+    if [[ -n "$WEB_PORT" ]]; then
+        code=$(curl -s --max-time 6 --resolve "$dom:$WEB_PORT:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$dom:$WEB_PORT/" 2>/dev/null)
+        [[ "$code" == 200 ]] && ok "https://$dom$([[ $WEB_PORT != 443 ]] && echo ":$WEB_PORT")/ — сайт" || warn "Порт $WEB_PORT отвечает ${code:-ничего}"
+    elif [[ "$any" == yes && ",$xp," != *",443,"* && " $xp " != *" 443 "* ]]; then
+        warn "Reality не на 443, а nginx не слушает 443 — https://$dom/ в браузере не откроется (fail2detect web site --port443)"
+    fi
+    if [[ "$WEB_HTTP" == yes ]]; then
+        code=$(curl -s --max-time 6 --resolve "$dom:80:127.0.0.1" -o /dev/null -w '%{http_code} %{redirect_url}' "http://$dom/" 2>/dev/null)
+        [[ "$code" == 301* ]] && ok "http://$dom/ → HTTPS" || warn "HTTP 80 отвечает «${code:-ничего}»"
+    else
+        warn "HTTP (80) не обслуживается — http://$dom в браузере не откроется"
+    fi
+    rm -f "$body"
+    ((bad == 0))
 }

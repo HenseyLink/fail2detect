@@ -233,6 +233,13 @@ node_prepare() {
     local l4; l4=$(transport_l4 "$t")
     title "Подготовка ноды: $(transport_title "$t") на $port/$l4"
 
+    # порт держит наш nginx (сайт/панель на прямом 443) — уступает его Xray и уходит на сокет
+    web_load
+    if [[ "$l4" == tcp && -n "$WEB_PORT" && "$port" == "$WEB_PORT" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$F2D_WEB_CONTAINER"; then
+        info "Порт $port занят сайтом (nginx) — он уходит за Reality (через сокет)"
+        list_del PUBLIC_TCP "$WEB_PORT"; web_set WEB_PORT ""; web_apply >/dev/null || die "nginx не перенастроился"
+    fi
+
     # порт свободен? (тот же порт у старого inbound'а — не помеха)
     if [[ "$old" != "$port/$l4" ]] && ss -H -"${l4:0:1}"ln "( sport = :$port )" 2>/dev/null | grep -q .; then
         die "Порт $port/$l4 уже занят: $(ss -H -"${l4:0:1}"lnp "( sport = :$port )" | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | head -1)"
@@ -256,14 +263,23 @@ node_prepare() {
     fi
 
     # selfsteal-сайт для Reality
+    # Сокет мог остаться от nginx без server-блока для этого домена (панель, прошлая
+    # установка) — тогда Reality отдаёт сканеру обрыв рукопожатия вместо сайта.
+    # Поэтому домен прописываем всегда, а не только когда сокета нет.
     if transport_reality "$t" && [[ -z "$target" || "$target" == "$NGINX_SOCK" ]]; then
-        if [[ -S "$NGINX_SOCK" ]]; then
-            ok "Selfsteal-сайт уже работает ($NGINX_SOCK)"
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
+            ok "Selfsteal-сайт отдаёт nginx установщика (remnawave-nginx)"
         else
             [[ -n "$domain" ]] || die "Для Reality-selfsteal нужен домен (или укажите чужой target)"
             cert_ensure "$domain" || die "Не удалось получить сертификат для $domain"
             web_set SELFSTEAL_DOMAIN "$domain"
+            # домен должен открываться как обычный сайт и в браузере: если Reality
+            # не на 443, а 443 свободен — nginx слушает его сам
+            if [[ -z "$WEB_PORT" && "$port" != 443 && ",$(fw_xray_ports tcp)," != *",443,"* ]] && ! ss -H -tln '( sport = :443 )' 2>/dev/null | grep -q .; then
+                web_set WEB_PORT 443
+            fi
             web_apply || die "Не удалось поднять nginx для selfsteal"
+            ok "Сайт-маскировка: https://$domain/ ($(grep -o '<title>[^<]*' "$F2D_WEB_ROOT/index.html" 2>/dev/null | head -1 | sed 's/<title>//'))"
         fi
     fi
 

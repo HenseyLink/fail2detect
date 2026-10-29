@@ -12,7 +12,7 @@ export NO_COLOR=1 F2D_CONF_DIR="$WORK/etc"
 mkdir -p "$F2D_CONF_DIR"
 
 # shellcheck source=/dev/null
-for m in common detect transport certs web; do source "$ROOT/lib/$m.sh"; done
+for m in common detect transport certs site web; do source "$ROOT/lib/$m.sh"; done
 
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
@@ -98,6 +98,33 @@ web_set WEB_PORT ""
 check_nginx "только unix-сокет (Xray занял 443)"
 : > "$F2D_WEB_ENV"; web_set SELFSTEAL_DOMAIN node.example.com
 check_nginx "нода: только selfsteal"
+
+web_set WEB_HTTP yes
+check_nginx "нода: selfsteal + HTTP 80 (ACME, переход на HTTPS)"
+web_set PANEL_DOMAIN panel.example.com; web_set SUB_DOMAIN sub.example.com; web_set WEB_PORT 443
+check_nginx "всё вместе + HTTP 80"
+
+# сайт-маскировка вживую: то, что видит браузер и сканер
+printf '\n== сайт-маскировка в nginx\n'
+F2D_WEB_ROOT="$WORK/site"; SELFSTEAL_DOMAIN=node.example.com site_generate "$F2D_WEB_ROOT"
+: > "$F2D_WEB_ENV"; web_set SELFSTEAL_DOMAIN node.example.com; web_set WEB_PORT 443; web_set WEB_HTTP yes
+NGINX_SOCK=/dev/shm/nginx.sock web_render > "$WORK/site.conf"
+mkdir -p "$WORK/acme"
+cid=$(docker run -d -p 127.0.0.1:18443:443 -p 127.0.0.1:18080:80 -v "$WORK/site.conf:/etc/nginx/conf.d/default.conf:ro" \
+    -v "$WORK/le:/etc/letsencrypt:ro" -v "$F2D_WEB_ROOT:/var/www/html:ro" -v "$WORK/acme:/var/www/acme:ro" "$NGINX_IMAGE")
+for _ in $(seq 1 20); do curl -sk -o /dev/null --resolve node.example.com:18443:127.0.0.1 https://node.example.com:18443/ && break; sleep 0.5; done
+req() { curl -sk --max-time 5 --resolve "node.example.com:$2:127.0.0.1" -o /dev/null -w '%{http_code}' "$1"; }
+[[ "$(req https://node.example.com:18443/ 18443)" == 200 ]] && pass "главная — 200" || fail "главная" "$(docker logs "$cid" 2>&1 | tail -3)"
+[[ "$(req https://node.example.com:18443/services/ 18443)" == 200 && "$(req https://node.example.com:18443/assets/site.css 18443)" == 200 ]] && pass "страницы и стили" || fail "страницы"
+[[ "$(req https://node.example.com:18443/wp-login.php 18443)" == 404 ]] && pass "несуществующий адрес — настоящий 404" || fail "404"
+curl -sk --resolve node.example.com:18443:127.0.0.1 https://node.example.com:18443/nope | grep -q 'Page not found' && pass "страница 404 оформлена как сайт" || fail "тело 404"
+[[ "$(req http://node.example.com:18080/about/ 18080)" == 301 ]] && pass "HTTP → 301 на HTTPS" || fail "HTTP 301"
+[[ "$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' --resolve other.example:18443:127.0.0.1 https://other.example:18443/)" == 000 ]] && pass "чужой SNI — обрыв рукопожатия" || fail "чужой SNI"
+# через unix-сокет с PROXY protocol — как подключается Reality
+docker exec "$cid" sh -c 'apk add -q curl >/dev/null 2>&1 || true'
+code=$(docker exec "$cid" curl -sk --max-time 5 --unix-socket /dev/shm/nginx.sock --haproxy-protocol -o /dev/null -w '%{http_code}' https://node.example.com/ 2>/dev/null)
+[[ "$code" == 200 ]] && pass "сокет + PROXY protocol (путь Reality) — сайт" || fail "сокет Reality" "код ${code:-нет}"
+docker rm -f "$cid" >/dev/null
 
 printf '\nИтого: %d fail\n' "$FAIL"
 (( FAIL == 0 ))

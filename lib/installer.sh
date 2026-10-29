@@ -512,6 +512,10 @@ install_node() {
         if node_wait_port "${T_PORTS[$t]}" "$(transport_l4 "$t")"; then ok "$(transport_label "$t"): слушает ${T_PORTS[$t]}/$(transport_l4 "$t")"
         else warn "$(transport_label "$t"): ${T_PORTS[$t]}/$(transport_l4 "$t") пока не слушается (Xray поднимется, когда панель пришлёт конфиг)"; fi
     done
+    # сайт-маскировка: то, что увидит сканер или человек, открывший домен ноды
+    if [[ " ${T_LIST[*]} " == *-reality* && -z "$T_TARGET" && -n "$T_DOMAIN" ]]; then
+        web_selfsteal_check "$T_DOMAIN" || warn "Сайт-маскировка работает не полностью — подробности: fail2detect web check"
+    fi
     if [[ "$mode" == manual ]]; then
         echo
         info "Создайте в панели профиль с этими inbound'ами (или используйте автоматический режим):"

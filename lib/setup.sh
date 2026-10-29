@@ -123,6 +123,13 @@ doctor() {
     DOC_WARN=0; DOC_BAD=0
     print_env_summary
 
+    # сайт-маскировка ноды: проверяем глазами сканера
+    web_load
+    if has_node && [[ -n "$SELFSTEAL_DOMAIN" ]]; then
+        if web_selfsteal_check >/dev/null 2>&1; then _chk ok "Сайт-маскировка $SELFSTEAL_DOMAIN открывается через Reality"
+        else _chk bad "Сайт-маскировка $SELFSTEAL_DOMAIN не отвечает как обычный сайт" "fail2detect web check"; fi
+    fi
+
     title "Фаервол"
     if nft list table inet "$F2D_NFT_TABLE" >/dev/null 2>&1; then _chk ok "Таблица fail2detect загружена"
     else _chk bad "Таблица fail2detect не загружена" "fail2detect fw apply"; fi

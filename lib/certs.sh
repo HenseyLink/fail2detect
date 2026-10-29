@@ -165,6 +165,17 @@ _cert_issue() {   # domain
             --dns-cloudflare --dns-cloudflare-credentials "$CF_INI" --dns-cloudflare-propagation-seconds 30 \
             -d "$base" -d "*.$base" --cert-name "$base" || rc=$?
     else
+        # порт 80 держит наш nginx — выпускаем через webroot, ничего не останавливая
+        if [[ "${WEB_HTTP:-}" == yes ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$F2D_WEB_CONTAINER" \
+            && ss -H -tlnp '( sport = :80 )' 2>/dev/null | grep -q '"nginx"'; then
+            mkdir -p "$F2D_ACME_ROOT"
+            certbot certonly --non-interactive --agree-tos "${mail[@]}" --webroot -w "$F2D_ACME_ROOT" \
+                -d "$domain" --cert-name "$domain" || rc=$?
+            (( rc == 0 )) || { err "certbot завершился с ошибкой"; return 1; }
+            audit_write CERT - - - "выпущен сертификат $domain (webroot)"
+            ok "Сертификат для $domain выпущен"
+            return 0
+        fi
         if ss -H -tln '( sport = :80 )' | grep -q .; then
             local who; who=$(ss -H -tlnp '( sport = :80 )' | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | head -1)
             err "Порт 80 занят (${who:-?}) — HTTP-01 невозможен."
@@ -227,8 +238,17 @@ cert_hooks_install() {
 # вызывается certbot'ом при продлении
 acme_hook() {
     case "$1" in
-        pre)  [[ "$(grep -h '^authenticator' /etc/letsencrypt/renewal/*.conf 2>/dev/null)" == *standalone* ]] && acme_port80 open;;
-        post) acme_port80 close;;
+        pre)
+            if [[ "$(grep -h '^authenticator' /etc/letsencrypt/renewal/*.conf 2>/dev/null)" == *standalone* ]]; then
+                acme_port80 open
+                # старые сертификаты (standalone) продлеваются на порту 80 — освобождаем его на минуту
+                if ss -H -tlnp '( sport = :80 )' 2>/dev/null | grep -q '"nginx"' && docker stop "$F2D_WEB_CONTAINER" >/dev/null 2>&1; then
+                    touch /run/f2d-nginx-stopped
+                fi
+            fi;;
+        post)
+            [[ -f /run/f2d-nginx-stopped ]] && { docker start "$F2D_WEB_CONTAINER" >/dev/null 2>&1; rm -f /run/f2d-nginx-stopped; }
+            web_load; [[ "$WEB_HTTP" == yes ]] || acme_port80 close;;
         deploy)
             cert_sync_node
             docker exec "$F2D_WEB_CONTAINER" nginx -s reload >/dev/null 2>&1 || true

@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs web remnawave balancer installer remove setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web remnawave balancer installer remove setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -493,6 +493,29 @@ unset -f cc_resolve_sys cc_resolve_doh cc_tcp cc_req cc_nosni v
 # shellcheck source=/dev/null
 source "$ROOT/lib/censorcheck.sh"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
+
+section "Сайт-маскировка"
+SR="$WORK/siteroot"
+site_generate "$SR" >/dev/null
+[[ -f "$SR/index.html" && -f "$SR/about/index.html" && -f "$SR/services/index.html" && -f "$SR/contact/index.html" && -f "$SR/404.html" \
+   && -f "$SR/robots.txt" && -f "$SR/sitemap.xml" && -f "$SR/favicon.svg" && -f "$SR/assets/site.css" ]] && pass "сайт: 4 страницы, 404, robots, sitemap, favicon, стили" || fail "состав сайта" "$(cd "$SR" && find . -type f | sort | tr '\n' ' ')"
+grep -q 'f2d-site v2' "$SR/index.html" && grep -q 'href="/services/"' "$SR/index.html" && ! grep -q 'on its way' "$SR/index.html" && pass "главная со ссылками, без «скоро будет»" || fail "главная"
+echo '<html>my own site</html>' > "$SR/index.html"; site_generate "$SR"
+grep -q 'my own site' "$SR/index.html" && pass "свой сайт пользователя не перезаписывается" || fail "свой сайт затёрт"
+echo '<p>Our new website is on its way.</p>' > "$SR/index.html"; site_generate "$SR"
+grep -q 'f2d-site v2' "$SR/index.html" && pass "старая одностраничная заглушка заменяется новым сайтом" || fail "замена старой заглушки"
+a=$(grep -o '<title>[^<]*' "$SR/index.html"); site_generate "$SR" --force; b=$(grep -o '<title>[^<]*' "$SR/index.html")
+[[ -n "$b" ]] && pass "regen: новый сайт ($b)" || fail "regen"
+# конфиг nginx
+F2D_WEB_ENV="$WORK/web.env"; : > "$F2D_WEB_ENV"; web_set SELFSTEAL_DOMAIN node.example.com; web_set WEB_HTTP yes
+cert_dir() { echo "/etc/letsencrypt/live/$1"; }
+conf=$(web_render)
+# shellcheck disable=SC2016  # ищем буквальные $uri/$host из конфига nginx
+grep -q 'try_files $uri $uri/ =404;' <<<"$conf" && grep -q 'error_page 404 /404.html;' <<<"$conf" && pass "nginx: настоящий 404 вместо index на любой адрес" || fail "404 в конфиге"
+# shellcheck disable=SC2016
+grep -q 'listen 80;' <<<"$conf" && grep -q 'acme-challenge' <<<"$conf" && grep -q 'return 301 https://$host$request_uri;' <<<"$conf" && pass "nginx: HTTP 80 — ACME и переход на HTTPS" || fail "HTTP 80 в конфиге"
+web_set WEB_HTTP ""; grep -q 'listen 80' <<<"$(web_render)" && fail "HTTP 80 без WEB_HTTP" || pass "без WEB_HTTP порт 80 не слушается"
+unset -f cert_dir; source "$ROOT/lib/certs.sh"
 
 section "CLI"
 check "fail2detect --help" "$ROOT/fail2detect" --help
