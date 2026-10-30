@@ -53,6 +53,8 @@ fw_public_tcp() {
     # известные порты Xray не выпадают, даже если Xray сейчас перезапускается
     for x in $NODE_XRAY_PORTS; do [[ "${x#*/}" == tcp ]] && p+=("${x%/*}"); done
     for x in $PUBLIC_TCP; do p+=("$x"); done
+    # веб-серверы, слушающие снаружи (сайт, панель, прокси)
+    for x in $(detect_web_ports); do p+=("$x"); done
     if [[ "$(fw_mode)" == ufw ]]; then
         while read -r proto x; do [[ "$proto" == tcp ]] && p+=("$x"); done < <(ufw_open_ports)
     elif has_panel || has_sub_page || { has_node && [[ -z "$(detect_xray_ports)" ]]; }; then

@@ -150,6 +150,13 @@ detect_xray_ports() {
     ss -H -tlnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
 }
 
+# Порты, на которых СНАРУЖИ слушают веб-серверы (Caddy, nginx, Apache, HAProxy).
+# Сайты, панели, прокси: в режиме nft их нельзя закрывать. Раньше открытыми
+# оставались только SSH, Xray и 443, и порт 80 у работающего веб-сервера закрывался.
+detect_web_ports() {
+    ss -H -tlnp 2>/dev/null | awk '/"(caddy|nginx|apache2|httpd|haproxy|lighttpd)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
+}
+
 # UDP-порты Xray (Hysteria 2)
 detect_xray_udp_ports() {
     ss -H -ulnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs

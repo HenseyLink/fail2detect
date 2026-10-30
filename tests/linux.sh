@@ -32,6 +32,7 @@ has_panel() { [[ "$STUB_PANEL" == yes ]]; }
 has_sub_page() { false; }
 detect_ssh_ports()  { echo 2233; }
 detect_xray_ports() { echo 443; }
+detect_web_ports() { :; }
 detect_node_api_port() { echo 2222; }
 detect_panel_ips()  { echo "198.51.100.200 2001:db8:abcd::1"; }
 wan_iface() { echo eth0; }
@@ -393,6 +394,11 @@ out=$(printf '%s\n' 10 50 100 30 | st_chart 20 5 100 "" | sed 's/\x1b\[[0-9;]*m/
 grep -q '█' <<<"$out" && pass "график рисует блоки" || fail "st_chart блоки"
 out=$(st_strip 30 10 20 25 30 40 "0 50" "" | sed 's/\x1b\[[0-9;]*m//g')
 [[ ${#out} == 30 && "$out" == *├*▓*┃*▓*┤* ]] && pass "полоса задержки: ├─▓┃▓─┤ шириной 30" || fail "st_strip" "$out"
+err=$(_st_lat_box 40 "$WORK/нет-такого.lat" "◷ При отдаче" "" "0 100" 2>&1 >/dev/null)
+[[ -z "$err" ]] && pass "панель задержки до начала фазы: без ошибок на экран" || fail "_st_lat_box без файла" "$err"
+[[ "$(_st_chunk 1000 down)" == 262144 && "$(_st_chunk 50000000 down)" == 33554432 && "$(_st_chunk 1e9 down)" == 67108864 \
+   && "$(_st_chunk 1e9 up)" == 16777216 ]] && pass "размер запроса: ≈0.6 с потока, степень двойки, пределы" \
+   || fail "_st_chunk" "$(_st_chunk 1000 down) $(_st_chunk 50000000 down) $(_st_chunk 1e9 down) $(_st_chunk 1e9 up)"
 box=$(_st_box 30 "" "Заголовок" "строка" | sed 's/\x1b\[[0-9;]*m//g')
 widths_ok 30 <<<"$box" && pass "рамка ровно 30 символов" || fail "_st_box" "$box"
 # итог из сохранённых замеров
@@ -877,6 +883,22 @@ unset -f ssh scp backup_create require_root have confirm curl
 source "$ROOT/lib/common.sh"; source "$ROOT/lib/backup.sh"; load_config
 F2D_BACKUP_DIR="${F2D_STATE_DIR}/backup"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
+
+section "Веб-серверы снаружи"
+_web_ss() {
+    cat <<'SS'
+LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("caddy",pid=611,fd=7))
+LISTEN 0 4096 *:443 *:* users:(("caddy",pid=611,fd=8))
+LISTEN 0 511 127.0.0.1:8080 0.0.0.0:* users:(("nginx",pid=700,fd=6))
+LISTEN 0 4096 127.0.0.1:7443 0.0.0.0:* users:(("rw-core",pid=900,fd=3))
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=500,fd=3))
+SS
+}
+wp=$( (source "$ROOT/lib/detect.sh"; ss() { _web_ss; }; detect_web_ports) )
+[[ "$wp" == "80 443" ]] && pass "Caddy снаружи на 80/443 найден, локальный nginx 127.0.0.1:8080 — нет" || fail "detect_web_ports" "$wp"
+pub=$( (detect_web_ports() { echo "80 443"; }; detect_xray_ports() { :; }; has_panel() { false; }; has_sub_page() { false; }; has_node() { true; }
+       detect_node_api_port() { echo 2222; }; fw_mode() { echo nft; }; PUBLIC_TCP=""; NODE_XRAY_PORTS=""; fw_public_tcp) )
+[[ " $pub " == *" 80 "* && " $pub " == *" 443 "* ]] && pass "режим nft: 80 и 443 веб-сервера остаются открытыми ($pub)" || fail "fw_public_tcp + веб" "$pub"
 
 section "IP панели в iptables сторонних установщиков"
 IPT="$WORK/ipt.rules"; IPT_LOG="$WORK/ipt.log"

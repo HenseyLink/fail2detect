@@ -3,7 +3,8 @@
 #
 # Методика — как у cloudflare-speed-cli (kavehtehrani), переписана на bash:
 #   * задержка в простое: запросы __down?bytes=0 каждые 250 мс;
-#   * скачивание и отдача: 6 потоков, keep-alive, фаза 10 с; рядом — замеры
+#   * скачивание и отдача: 6 потоков, keep-alive, фаза 10 с; размер запроса
+#     каждый поток подгоняет под свою скорость (запрос ≈ 0.6 с); рядом — замеры
 #     задержки под нагрузкой (during=download|upload);
 #   * скорость — по окнам 250 мс; первые 20% фазы (не меньше 1 с) — разгон TCP,
 #     в итог не идут;
@@ -187,47 +188,75 @@ _st_probe_loop() {   # файл длительность [during]
     done
 }
 
-# поток: одна curl на много запросов (keep-alive), каждое завершение — "начало конец байты"
-_st_worker() {   # down|up chunk n_urls файл_событий
-    local dir="$1" chunk="$2" n="$3" ev="$4" i args=() buf=()
+# поток до конца фазы, каждое завершение запроса — "начало конец байты" в файл
+# событий. Сначала короткая пачка (2 запроса) — узнать скорость потока, затем
+# одно keep-alive соединение до конца фазы с запросами по ≈ ST_REQ_SEC: у мелких
+# запросов ожидание ответа сервера (десятки мс) съедает заметную долю скорости,
+# а новое соединение — это заново разгон TCP.
+ST_REQ_SEC=0.6
+_st_chunk() {   # байт/с down|up → размер запроса (степень двойки: меньше разных тел отдачи)
+    awk -v r="$1" -v d="$2" -v t="$ST_REQ_SEC" 'BEGIN { c = r * t; mx = (d == "down") ? 2^26 : 2^24
+        p = 2^18; while (p * 1.5 < c && p < mx) p *= 2; printf "%d", p }'
+}
+
+_st_worker() {   # down|up начальный_размер конец_фазы файл_событий номер
+    local dir="$1" chunk="$2" end="$3" ev="$4" rf="$ST_T/$1.rate$5" i k=2 r body args buf=()
     command -v stdbuf >/dev/null && buf=(stdbuf -oL)
-    if [[ "$dir" == down ]]; then
-        for ((i = 0; i < n; i++)); do args+=(-o /dev/null "$CF_SPEED/__down?bytes=$chunk"); done
-        args+=(-w '%{time_pretransfer} %{time_starttransfer} %{time_total} %{size_download}\n')
-    else
-        for ((i = 0; i < n; i++)); do args+=(-o /dev/null "$CF_SPEED/__up"); done
-        args+=(-H 'Content-Type: application/octet-stream' --data-binary "@$ST_T/up.bin"
-               -w '%{time_pretransfer} %{time_starttransfer} %{time_total} %{size_upload}\n')
-    fi
-    "${buf[@]}" curl -sS -H 'Referer: https://speed.cloudflare.com/' -A 'Mozilla/5.0 fail2detect' "${args[@]}" 2>/dev/null \
-    | while read -r pre st tot by; do
-        # скачивание: байты идут от первого байта ответа до конца;
-        # отдача: от конца рукопожатия до первого байта ответа
-        awk -v n="$(_st_now)" -v pre="$pre" -v st="$st" -v tot="$tot" -v by="$by" -v d="$dir" 'BEGIN {
-            b = n - tot
-            if (d == "down") printf "%.4f %.4f %s\n", b + st, n, by
-            else printf "%.4f %.4f %s\n", b + pre, b + st, by }' >> "$ev"
+    while awk -v a="$(_st_now)" -v e="$end" 'BEGIN{exit !(a < e)}'; do
+        args=()
+        if [[ "$dir" == down ]]; then
+            for ((i = 0; i < k; i++)); do args+=(-o /dev/null "$CF_SPEED/__down?bytes=$chunk"); done
+            args+=(-w '%{time_pretransfer} %{time_starttransfer} %{time_total} %{size_download}\n')
+        else
+            # тело одного размера на все потоки: создаём один раз, без гонки
+            body="$ST_T/up-$chunk.bin"
+            [[ -s "$body" ]] || { head -c "$chunk" /dev/urandom > "$body.$5" && mv -f "$body.$5" "$body"; }
+            for ((i = 0; i < k; i++)); do args+=(-o /dev/null "$CF_SPEED/__up"); done
+            args+=(-H 'Content-Type: application/octet-stream' --data-binary "@$body"
+                   -w '%{time_pretransfer} %{time_starttransfer} %{time_total} %{size_upload}\n')
+        fi
+        "${buf[@]}" curl -sS -H 'Referer: https://speed.cloudflare.com/' -A 'Mozilla/5.0 fail2detect' "${args[@]}" 2>/dev/null \
+        | while read -r pre st tot by; do
+            # скачивание: байты идут от первого байта ответа до конца;
+            # отдача: от конца рукопожатия до первого байта ответа
+            awk -v n="$(_st_now)" -v pre="$pre" -v st="$st" -v tot="$tot" -v by="$by" -v d="$dir" -v ev="$ev" -v rf="$rf" 'BEGIN {
+                b = n - tot
+                if (d == "down") { printf "%.4f %.4f %s\n", b + st, n, by >> ev; dt = tot - st }
+                else { printf "%.4f %.4f %s\n", b + pre, b + st, by >> ev; dt = st - pre }
+                if (dt > 0.02 && by > 0) printf "%d\n", by / dt > rf }'
+        done
+        r=$(cat "$rf" 2>/dev/null); [[ -n "$r" ]] && chunk=$(_st_chunk "$r" "$dir")
+        # запросов — с запасом на остаток фазы (лишние оборвёт конец фазы)
+        k=$(awk -v a="$(_st_now)" -v e="$end" -v c="$chunk" -v r="${r:-0}" 'BEGIN { t = (r > 0) ? c / r : 0.3
+            if (t < 0.05) t = 0.05; k = int((e - a) / t * 2) + 2; if (k > 300) k = 300; print k }')
     done
+}
+
+# остановить процесс со всеми потомками (curl внутри конвейеров потоков —
+# внуки движка: без этого они качают дальше и пишут в удалённый каталог)
+_st_kill_tree() {
+    local c
+    kill -STOP "$1" 2>/dev/null   # замороженный поток не запустит новую пачку, пока гасим его детей
+    for c in $(pgrep -P "$1" 2>/dev/null); do _st_kill_tree "$c"; done
+    kill -TERM "$1" 2>/dev/null; kill -CONT "$1" 2>/dev/null
 }
 
 # фаза скачивания/отдачи: потоки + задержка под нагрузкой
 _st_phase() {   # down|up длительность
-    local dir="$1" dur="$2" ev lat chunk n i pids=() t0 rate
+    local dir="$1" dur="$2" ev lat chunk i pids=() t0 rate end
     ev="$ST_T/$dir.ev"; lat="$ST_T/$dir.lat"; : > "$ev"; : > "$lat"
-    # размер запроса — чтобы поток завершал запрос примерно раз в 0.5 с
+    # начальный размер запроса — по грубой оценке на поток; дальше каждый поток подстраивает свой
     rate=$(cat "$ST_T/$dir.est" 2>/dev/null); [[ -n "$rate" ]] || rate=1000000
-    chunk=$(awk -v r="$rate" -v w="$ST_WORKERS" -v d="$dir" 'BEGIN{c = r * 1.5 / w * 0.5; mx = (d == "down") ? 25e6 : 10e6
-        if (c < 262144) c = 262144; if (c > mx) c = mx; printf "%d", c}')
-    n=$(( (dur + 2) * 12 )); ((n > 300)) && n=300   # запас: канал может быть в разы быстрее оценки
-    [[ "$dir" == up ]] && head -c "$chunk" /dev/urandom > "$ST_T/up.bin"
+    chunk=$(_st_chunk "$(awk -v r="$rate" -v w="$ST_WORKERS" 'BEGIN{printf "%d", r * 1.5 / w}')" "$dir")
     t0=$(_st_now); echo "$t0" > "$ST_T/$dir.t0"
-    for ((i = 0; i < ST_WORKERS; i++)); do _st_worker "$dir" "$chunk" "$n" "$ev" & pids+=($!); done
+    end=$(awk -v a="$t0" -v d="$dur" 'BEGIN{printf "%.3f", a + d}')
+    for ((i = 0; i < ST_WORKERS; i++)); do _st_worker "$dir" "$chunk" "$end" "$ev" "$i" & pids+=($!); done
     _st_probe_loop "$lat" "$dur" "$([[ $dir == down ]] && echo download || echo upload)" &
     local lp=$!
     sleep "$dur"; wait "$lp" 2>/dev/null
     # дать завершиться запросам в полёте, затем остановить
     sleep 1.5
-    for i in "${pids[@]}"; do pkill -P "$i" 2>/dev/null; kill "$i" 2>/dev/null; done
+    for i in "${pids[@]}"; do _st_kill_tree "$i"; done
     wait "${pids[@]}" 2>/dev/null
     return 0
 }
@@ -309,7 +338,7 @@ st_result_json() {   # durations: dl ul
     local dl_d="$1" ul_d="$2" now
     now=$(_st_now)
     local dls uls il dll ull dl_cv ul_cv
-    _st_lat_json() { st_stats < "$1" 2>/dev/null | awk '{printf "{\"n\":%d,\"mean\":%s,\"med\":%s,\"p25\":%s,\"p75\":%s,\"p95\":%s,\"min\":%s,\"max\":%s,\"jitter\":%s}", $1,$2,$3,$4,$5,$6,$7,$8,$9}'; }
+    _st_lat_json() { [[ -s "$1" ]] && st_stats < "$1" | awk '{printf "{\"n\":%d,\"mean\":%s,\"med\":%s,\"p25\":%s,\"p75\":%s,\"p95\":%s,\"min\":%s,\"max\":%s,\"jitter\":%s}", $1,$2,$3,$4,$5,$6,$7,$8,$9}'; }
     _st_tp_json() {   # dir dur
         local t0; t0=$(cat "$ST_T/$1.t0" 2>/dev/null) || return 0
         st_series "$ST_T/$1.ev" "$t0" "$2" "$now" | st_steady "$2" | st_stats | awk '{printf "{\"mean\":%s,\"med\":%s,\"p25\":%s,\"p75\":%s,\"p95\":%s,\"max\":%s}", $2,$3,$4,$5,$6,$8}'
@@ -369,7 +398,8 @@ _st_tp_box() {   # w dir title color dur now live
 
 _st_lat_box() {   # w файл title color scale
     local w="$1" f="$2" title="$3" col="$4" sc="$5" stats n mean med p25 p75 p95 mn mx sd
-    stats=$(st_stats < "$f" 2>/dev/null)
+    # файла ещё нет (фаза не началась): редирект упал бы с ошибкой прямо на экран
+    [[ -s "$f" ]] && stats=$(st_stats < "$f")
     read -r n mean med p25 p75 p95 mn mx sd <<<"$stats"
     local strip foot
     if [[ -n "$stats" ]]; then
@@ -536,7 +566,7 @@ _st_history_screen() {
     read -rsn1 _ </dev/tty 2>/dev/null
 }
 
-_st_stop_engine() { kill "$1" 2>/dev/null; pkill -P "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+_st_stop_engine() { _st_kill_tree "$1"; wait "$1" 2>/dev/null; }
 
 speedtest_run() {   # [--quick] [--plain] [--json] [--no-save]
     have curl || die "Нужен curl"; have jq || die "Нужен jq"
