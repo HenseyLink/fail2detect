@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality geocheck update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
