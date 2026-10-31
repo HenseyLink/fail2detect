@@ -397,7 +397,7 @@ _st_tp_box() {   # w dir title color dur now live
 }
 
 _st_lat_box() {   # w файл title color scale
-    local w="$1" f="$2" title="$3" col="$4" sc="$5" stats n mean med p25 p75 p95 mn mx sd
+    local w="$1" f="$2" title="$3" col="$4" sc="$5" stats="" n mean med p25 p75 p95 mn mx sd
     # файла ещё нет (фаза не началась): редирект упал бы с ошибкой прямо на экран
     [[ -s "$f" ]] && stats=$(st_stats < "$f")
     read -r n mean med p25 p75 p95 mn mx sd <<<"$stats"
