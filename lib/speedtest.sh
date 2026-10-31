@@ -568,7 +568,64 @@ _st_history_screen() {
 
 _st_stop_engine() { _st_kill_tree "$1"; wait "$1" 2>/dev/null; }
 
+# ---------------------------------------------------------------- движок на Rust
+# f2d-speed (каталог speed/ репозитория): точнее bash-версии — байты считает по
+# мере прихода, у каждого потока своё соединение. Бинарник берётся из релиза
+# fail2detect той же версии (sha256 проверяется); нет его — работает bash-версия.
+# SPEEDTEST_ENGINE=bash — всегда bash; F2D_SPEED_BIN — свой бинарник.
+ST_BIN_URL="https://github.com/${F2D_REPO}/releases/download"
+
+_st_bin_dir() {
+    if [[ -w "$F2D_STATE_DIR" ]] || { [[ $EUID -eq 0 ]] && mkdir -p "$F2D_STATE_DIR" 2>/dev/null; }; then echo "$F2D_STATE_DIR/bin"
+    else echo "${XDG_CACHE_HOME:-$HOME/.cache}/fail2detect"; fi
+}
+
+speedtest_bin() {
+    [[ -n "${F2D_SPEED_BIN:-}" ]] && { [[ -x "$F2D_SPEED_BIN" ]] && echo "$F2D_SPEED_BIN"; return; }
+    [[ "$(uname -s)" == Linux ]] || return 1
+    local arch dir bin miss tmp url sum
+    case "$(uname -m)" in x86_64|amd64) arch=x86_64;; aarch64|arm64) arch=aarch64;; *) return 1;; esac
+    dir=$(_st_bin_dir); bin="$dir/f2d-speed"; miss="$dir/.miss-$F2D_VERSION"
+    [[ -x "$bin" && "$("$bin" --version 2>/dev/null)" == "$F2D_VERSION" ]] && { echo "$bin"; return 0; }
+    # релиза этой версии нет или GitHub недоступен — не пробуем чаще раза в сутки
+    [[ -f "$miss" ]] && (( $(date +%s) - $(stat -c %Y "$miss" 2>/dev/null || echo 0) < 86400 )) && return 1
+    mkdir -p "$dir" 2>/dev/null || return 1
+    url="$ST_BIN_URL/v$F2D_VERSION/f2d-speed-$arch-linux.tar.gz"
+    tmp=$(mktemp -d)
+    [[ -t 2 ]] && printf '  %s➜%s загружаю движок спидтеста (f2d-speed %s)…\r' "$C_CYAN" "$C_RESET" "$F2D_VERSION" >&2
+    if curl -fsSL --connect-timeout 5 --max-time 60 -o "$tmp/a.tgz" "$url" 2>/dev/null \
+        && sum=$(curl -fsSL --connect-timeout 5 --max-time 15 "$url.sha256" 2>/dev/null | awk '{print $1}') \
+        && [[ "$(sha256sum "$tmp/a.tgz" | awk '{print $1}')" == "$sum" ]] \
+        && tar -xzf "$tmp/a.tgz" -C "$tmp" f2d-speed 2>/dev/null \
+        && [[ "$("$tmp/f2d-speed" --version 2>/dev/null)" == "$F2D_VERSION" ]]; then
+        install -m 755 "$tmp/f2d-speed" "$bin"; rm -rf "$tmp"; rm -f "$dir"/.miss-*
+        [[ -t 2 ]] && printf '\033[K' >&2
+        echo "$bin"; return 0
+    fi
+    rm -rf "$tmp"; : > "$miss"
+    [[ -t 2 ]] && printf '\033[K' >&2
+    return 1
+}
+
+# запуск f2d-speed; переключатель автосохранения (A) сохраняется в конфиг, как у bash-версии
+_st_run_bin() {   # бинарник аргументы…
+    local bin="$1" a args=() so rc save0="${SPEEDTEST_SAVE:-yes}" save1; shift
+    for a in "$@"; do case "$a" in --quick|--plain|--json|--no-save) args+=("$a");; esac; done
+    [[ "$save0" == yes ]] || args+=(--no-save)
+    so=$(mktemp)
+    "$bin" --history-dir "$ST_HISTORY_DIR" --f2d-version "$F2D_VERSION" --state-out "$so" "${args[@]}"; rc=$?
+    save1=$(sed -n 's/^SPEEDTEST_SAVE=//p' "$so" 2>/dev/null); rm -f "$so"
+    if [[ -n "$save1" && "$save1" != "$save0" && " $* " != *" --no-save "* ]]; then
+        SPEEDTEST_SAVE="$save1"; [[ $EUID -eq 0 ]] && config_set SPEEDTEST_SAVE "$save1" >/dev/null 2>&1
+    fi
+    return "$rc"
+}
+
 speedtest_run() {   # [--quick] [--plain] [--json] [--no-save]
+    local bin
+    if [[ "${SPEEDTEST_ENGINE:-auto}" != bash ]] && bin=$(speedtest_bin); then
+        _st_run_bin "$bin" "$@"; return
+    fi
     have curl || die "Нужен curl"; have jq || die "Нужен jq"
     ((BASH_VERSINFO[0] >= 5)) || die "Нужен bash 5+"
     local quick="" plain="" json="" a

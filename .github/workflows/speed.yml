@@ -1,0 +1,106 @@
+name: f2d-speed
+
+# Движок спидтеста на Rust (speed/). Тесты — на каждый push; бинарники для
+# Linux x86_64/aarch64 собираются в main, когда у версии из lib/common.sh ещё
+# нет релиза (или по кнопке), и прикладываются к релизу v<версия>: оттуда их
+# скачивает f2d speed.
+
+on:
+  push:
+    paths: ["speed/**", "lib/common.sh", ".github/workflows/speed.yml"]
+  pull_request:
+    paths: ["speed/**"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "пересобрать, даже если бинарники у релиза уже есть"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        working-directory: speed
+        run: cargo test --release --locked
+
+  plan:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          v=$(sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' lib/common.sh)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          have=$(gh release view "v$v" --json assets --jq '[.assets[].name | select(startswith("f2d-speed-"))] | length' 2>/dev/null || echo 0)
+          if [[ "$FORCE" == true || "$have" -lt 4 ]]; then echo build=yes >> "$GITHUB_OUTPUT"; else echo build=no >> "$GITHUB_OUTPUT"; fi
+          echo "версия $v, бинарников у релиза: $have"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'yes'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: сборка
+        working-directory: speed
+        env:
+          V: ${{ needs.plan.outputs.version }}
+        run: |
+          # версия бинарника = версия fail2detect: f2d speed сверяет их
+          sed -i -E "0,/^version = /s/^version = .*/version = \"$V\"/" Cargo.toml
+          cross build --release --target ${{ matrix.target }}
+          out=target/${{ matrix.target }}/release/f2d-speed
+          [[ "$(file -b "$out")" == *"statically linked"* || "$(file -b "$out")" == *"static-pie"* ]]
+          mkdir -p ../dist && tar -C "$(dirname "$out")" -czf ../dist/f2d-speed-${{ matrix.arch }}-linux.tar.gz f2d-speed
+          cd ../dist && sha256sum f2d-speed-${{ matrix.arch }}-linux.tar.gz > f2d-speed-${{ matrix.arch }}-linux.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: f2d-speed-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: релиз v${{ needs.plan.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.plan.outputs.version }}
+        run: |
+          ls -la dist
+          if ! gh release view "v$V" >/dev/null 2>&1; then
+            gh release create "v$V" --target "$GITHUB_SHA" --title "fail2detect $V" \
+              --notes "Обновление: \`f2d update\`. Бинарники f2d-speed — движок \`f2d speed\`, скачиваются автоматически."
+          fi
+          gh release upload "v$V" dist/* --clobber

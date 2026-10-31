@@ -421,6 +421,25 @@ grep -q 'Bufferbloat   A ' <<<"$out" && grep -q 'Приемлемо' <<<"$out" &
 (( $(tail -n +3 <<<"$out" | max_width) <= 120 )) && pass "итоговый экран не шире 120 колонок" || fail "ширина экрана" "$(tail -n +3 <<<"$out" | max_width)"
 out=$(COLUMNS=80 st_render 10 10 yes | sed 's/\x1b\[[0-9;]*m//g')
 (( $(tail -n +3 <<<"$out" | max_width) <= 80 )) && pass "узкий терминал (80): панели друг под другом" || fail "ширина 80" "$(tail -n +3 <<<"$out" | max_width)"
+# движок на Rust: аргументы, переключатель автосохранения → конфиг, запасной bash
+cat > "$WORK/f2d-speed" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" > "${0%/*}/speed.args"
+while [[ $# -gt 0 ]]; do [[ "$1" == --state-out ]] && echo SPEEDTEST_SAVE=no > "$2"; shift; done
+STUB
+chmod +x "$WORK/f2d-speed"
+# тесты идут от root (контейнер) — config_set вызывается
+( st_cfg=""; config_set() { st_cfg="$1=$2"; }
+  F2D_SPEED_BIN="$WORK/f2d-speed" SPEEDTEST_SAVE=yes speedtest_run --quick >/dev/null 2>&1; echo "$st_cfg" > "$WORK/speed.cfg" ) 2>/dev/null
+grep -q -- "--history-dir $ST_HISTORY_DIR --f2d-version $F2D_VERSION --state-out .* --quick" "$WORK/speed.args" \
+    && pass "f2d speed запускает f2d-speed с историей, версией и --quick" || fail "аргументы f2d-speed" "$(cat "$WORK/speed.args")"
+[[ "$(cat "$WORK/speed.cfg")" == "SPEEDTEST_SAVE=no" ]] && pass "A в дашборде Rust сохраняется в конфиг" || fail "автосохранение → конфиг" "$(cat "$WORK/speed.cfg")"
+# релиза нет (curl падает) — пусто, отметка «не пробовать сутки», запасной bash
+mkdir -p "$WORK/st-state"
+( curl() { return 22; }; uname() { [[ "$1" == -s ]] && echo Linux || echo x86_64; }
+  F2D_STATE_DIR="$WORK/st-state" speedtest_bin >/dev/null 2>&1 && echo found || echo none ) > "$WORK/speed.bin"
+[[ "$(cat "$WORK/speed.bin")" == none && -f "$WORK/st-state/bin/.miss-$F2D_VERSION" ]] \
+    && pass "без релиза f2d-speed — bash-версия, повтор загрузки не раньше чем через сутки" || fail "speedtest_bin без релиза" "$(ls -a "$WORK/st-state/bin" 2>&1)"
 if [[ -n "$st_lc_saved" ]]; then export LC_ALL="$st_lc_saved"; else unset LC_ALL; fi
 
 section "Бенчмарк сети"
