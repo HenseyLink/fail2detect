@@ -154,6 +154,23 @@ read -r t _ <<<"$(usage_ru "ISP/MOB")"; [[ "$t" == Мобильный ]] && pass
 ABUSEIPDB_KEY=""; G=(); gc_parse "$WORK/ipq" 78.135.77.114; [[ "${G[abuseipdb.asntype]}" == nokey ]] && pass "без ключа AbuseIPDB — пометка «нужен ключ»" || fail "без ключа"
 unset G
 
+section "GeoCheck: эталонная страна и расхождения"
+# IP зарегистрирован в TR, сервер в Болгарии: эталон — BG (большинство гео-баз), не реестр
+geo_out=$(
+    is_ipv4() { [[ "$1" =~ ^[0-9.]+$ ]]; }
+    curl() { case "$*" in *api.ipify.org*) echo 203.0.113.7;; *api6.ipify.org*) return 7;;
+                          *rdap.db.ripe.net*) echo '{"country":"TR"}';; *ipinfo.io/widget*) echo '{"data":{"org":"AS64500 Test"}}';; esac; }
+    gr_svc() { case "$1" in jetbrains|microsoft) echo US;; gemini|youtube_premium|spotify_signup|disney_access|reddit_guest) echo Да;; google_captcha) echo Нет;; *) echo BG;; esac; }
+    gr_cdn() { echo "BG (SOF)"; }
+    gr_geoip() { case "$1" in ifconfig) echo US;; ripe) echo TR;; *) echo BG;; esac; }
+    geocheck_run --full 2>&1 )
+grep -q 'Страна (IPv4): BG — так видят 15 из 16; по реестру TR' <<<"$geo_out" && pass "эталон — страна большинства гео-баз (BG), реестр (TR) — пометкой" || fail "эталон GeoCheck" "$geo_out"
+odd=$(sed -n '/^Видят другую страну/,/^!/p' <<<"$geo_out")
+grep -q '^JetBrains  *US' <<<"$odd" && grep -q '^ifconfig.co  *US' <<<"$odd" && ! grep -q 'rdap\|TR' <<<"$odd" \
+    && pass "расхождения — таблицей, без реестра RIPE и без «не TR»" || fail "таблица расхождений" "$odd"
+grep -q 'с другой страной: 3' <<<"$geo_out" && pass "итог: 3 сервиса с другой страной" || fail "итог расхождений" "$geo_out"
+unset geo_out odd
+
 section "Удаление: защита от лишнего"
 for bad in / /etc /opt /root /home "$WORK"; do
     _safe_rmdir "$bad" 2>/dev/null && fail "_safe_rmdir согласился удалить $bad" || pass "_safe_rmdir отказал: $bad"

@@ -212,6 +212,20 @@ gr_cell() {   # значение ширина эталон
     printf '%s%s%s' "$col" "$(gr_pad "$val" "$w")" "$C_RESET"
 }
 
+# эталонная страна версии IP: та, что у большинства гео-баз (нет ответов — у
+# большинства сервисов). Не страна регистрации: подсеть, зарегистрированную в
+# одной стране, часто анонсируют из другой — там её и видят. RIPE (rdap) — это
+# реестр, а не геолокация: в эталон и в расхождения он не идёт.
+GR_REGISTRY=ripe
+gr_ref() {   # ipver -> "страна совпавших всего" (пусто, если ответов нет)
+    local v="$1" pre out
+    for pre in geo svc; do
+        out=$(for f in "$GR_TMP/${pre}_"*"_$v"; do [[ -f "$f" && "$f" != */geo_${GR_REGISTRY}_* ]] && head -1 "$f"; done | grep -E '^[A-Z]{2}$' \
+            | sort | uniq -c | sort -k1,1nr -k2,2 | awk '{n += $1; if (NR == 1) { c = $2; m = $1 } } END { if (n) print c, m, n }')
+        [[ -n "$out" ]] && { echo "$out"; return; }
+    done
+}
+
 gr_mask() {   # 78.135.77.114 -> 78.135.*.*, 2a01:f900:11:5::1 -> 2a01:f900:11::
     local ip="$1" p
     if [[ "$ip" == *:* ]]; then IFS=: read -ra p <<<"$ip"; echo "${p[0]}:${p[1]}:${p[2]}::"
@@ -269,41 +283,60 @@ _geocheck_run() {
     [[ -n "$ip6" ]] || printf '%sIPv6%s: %sнет%s\n' "$C_CYAN" "$C_RESET" "$C_GRAY" "$C_RESET"
     printf '%sASN%s: %s%s%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "${asn:-?}" "$C_RESET"
 
-    local ref="${reg4:-$reg6}" w1 w2=14
-    gr_table() {   # заголовок префикс массив-имён массив-названий ширина_1
-        local head="$1" pre="$2" w1="$5" name t val
-        local -n names="$3" titles="$4"
-        printf '\n%s%s%s\n\n' "$C_BOLD$C_CYAN" "$head" "$C_RESET"
-        printf '%s%s%s%s%s\n' "$C_BOLD" "$(gr_pad "Сервис" "$w1")" "$(gr_pad IPv4 "$w2")" "IPv6" "$C_RESET"
-        for name in "${names[@]}"; do
-            t="${titles[$name]}"
-            printf '%s%s%s' "$C_GREEN" "$(gr_pad "$t" "$w1")" "$C_RESET"
-            for v in 4 6; do
-                if [[ -f "$GR_TMP/${pre}_${name}_$v" ]]; then val=$(head -1 "$GR_TMP/${pre}_${name}_$v")
-                else val="$GR_NA"; fi
-                local inv=""; [[ "$name" == google_captcha ]] && inv=inverse
-                gr_cell "$val" "$w2" "$ref" "$inv"
-            done
-            echo
-        done
-    }
-    gr_table "Популярные сервисы" svc GR_SERVICES GR_SERVICE_TITLE 24
-    gr_table "CDN" cdn GR_CDN GR_CDN_TITLE 24
-    gr_table "Гео-базы (GeoIP)" geo GR_GEOIP GR_GEOIP_TITLE 24
+    # эталон — страна большинства гео-баз, у каждой версии IP своя
+    local ref4="" ref6="" r4 r6 m n
+    r4=$(gr_ref 4); r6=$(gr_ref 6); ref4="${r4%% *}"; ref6="${r6%% *}"
+    for v in 4 6; do
+        local r reg; [[ $v == 4 ]] && { r="$r4"; reg="$reg4"; } || { r="$r6"; reg="$reg6"; }
+        [[ -n "$r" ]] || continue
+        read -r _ m n <<<"$r"
+        printf '%sСтрана%s (IPv%s): %s%s%s %s— так видят %s из %s%s' "$C_CYAN" "$C_RESET" "$v" "$C_BOLD" "${r%% *}" "$C_RESET" "$C_GRAY" "$m" "$n" "$C_RESET"
+        [[ -n "$reg" && "$reg" != "${r%% *}" ]] && printf '%s; по реестру %s — обычное дело для арендованных подсетей%s' "$C_GRAY" "$reg" "$C_RESET"
+        echo
+    done
 
-    # итог: кто видит не ту страну
-    local odd=() f val
-    for f in "$GR_TMP"/svc_*_4 "$GR_TMP"/geo_*_4; do
-        val=$(head -1 "$f" 2>/dev/null)
-        [[ "$val" =~ ^[A-Z]{2}$ && -n "$ref" && "$val" != "$ref" ]] || continue
-        f="${f##*/}"; f="${f#*_}"; f="${f%_4}"
-        odd+=("${GR_SERVICE_TITLE[$f]:-${GR_GEOIP_TITLE[$f]:-$f}}=$val")
+    local w1=24 w2=14
+    gr_row() {   # префикс имя название
+        local v val inv=""; [[ "$2" == google_captcha ]] && inv=inverse
+        printf '%s%s%s' "$C_GREEN" "$(gr_pad "$3" "$w1")" "$C_RESET"
+        for v in 4 6; do
+            if [[ -f "$GR_TMP/${1}_${2}_$v" ]]; then val=$(head -1 "$GR_TMP/${1}_${2}_$v"); else val="$GR_NA"; fi
+            gr_cell "$val" "$w2" "$([[ $v == 4 ]] && echo "$ref4" || echo "$ref6")" "$inv"
+        done
+        echo
+    }
+    gr_head() { printf '\n%s%s%s\n\n%s%s%s%s%s\n' "$C_BOLD$C_CYAN" "$1" "$C_RESET" "$C_BOLD" "$(gr_pad "Сервис" "$w1")" "$(gr_pad IPv4 "$w2")" "IPv6" "$C_RESET"; }
+    gr_table() {   # заголовок префикс массив-имён массив-названий
+        local name; local -n names="$3" titles="$4"
+        gr_head "$1"
+        for name in "${names[@]}"; do gr_row "$2" "$name" "${titles[$name]}"; done
+    }
+    gr_table "Популярные сервисы" svc GR_SERVICES GR_SERVICE_TITLE
+    gr_table "CDN" cdn GR_CDN GR_CDN_TITLE
+    gr_table "Гео-базы (GeoIP)" geo GR_GEOIP GR_GEOIP_TITLE
+
+    # итог: кто видит не ту страну (CDN не в счёт — узел и должен быть рядом)
+    local odd=() f val pre name
+    for f in "$GR_TMP"/svc_* "$GR_TMP"/geo_*; do
+        [[ -f "$f" && "$f" != */geo_${GR_REGISTRY}_* ]] || continue
+        val=$(head -1 "$f"); v="${f##*_}"
+        [[ $v == 4 ]] && m="$ref4" || m="$ref6"
+        [[ "$val" =~ ^[A-Z]{2}$ && -n "$m" && "$val" != "$m" ]] || continue
+        f="${f##*/}"; f="${f%_*}"
+        [[ " ${odd[*]} " == *" $f "* ]] || odd+=("$f")
     done
     echo
     if ((${#odd[@]})); then
-        warn "Видят другую страну (не $ref): ${odd[*]}"
+        gr_head "Видят другую страну"
+        for f in "${odd[@]}"; do
+            pre="${f%%_*}"; name="${f#*_}"
+            if [[ $pre == svc ]]; then gr_row svc "$name" "${GR_SERVICE_TITLE[$name]}"; else gr_row geo "$name" "${GR_GEOIP_TITLE[$name]}"; fi
+        done
+        echo
+        warn "Сервисов и баз с другой страной: ${#odd[@]} — клиенты ноды получат у них этот регион"
     else
-        ok "Все ответившие сервисы видят страну ${ref:-?}"
+        local six=""; [[ -n "$ref4" && -n "$ref6" && "$ref6" != "$ref4" ]] && six=" (IPv6: $ref6)"
+        ok "Все ответившие сервисы видят страну ${ref4:-$ref6}$six"
     fi
     printf '%sСпособы определения регионов — github.com/vernette/ipregion (MIT)%s\n' "$C_GRAY" "$C_RESET"
 }
