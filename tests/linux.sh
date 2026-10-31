@@ -157,12 +157,32 @@ unset G
 section "GeoCheck: эталонная страна и расхождения"
 # IP зарегистрирован в TR, сервер в Болгарии: эталон — BG (большинство гео-баз), не реестр
 geo_out=$(
+    # шаблоны case — с открывающей скобкой: bash 5.1 иначе путает их с концом $( )
     is_ipv4() { [[ "$1" =~ ^[0-9.]+$ ]]; }
-    curl() { case "$*" in *api.ipify.org*) echo 203.0.113.7;; *api6.ipify.org*) return 7;;
-                          *rdap.db.ripe.net*) echo '{"country":"TR"}';; *ipinfo.io/widget*) echo '{"data":{"org":"AS64500 Test"}}';; esac; }
-    gr_svc() { case "$1" in jetbrains|microsoft) echo US;; gemini|youtube_premium|spotify_signup|disney_access|reddit_guest) echo Да;; google_captcha) echo Нет;; *) echo BG;; esac; }
+    curl() {
+        case "$*" in
+            (*api.ipify.org*) echo 203.0.113.7;;
+            (*api6.ipify.org*) return 7;;
+            (*rdap.db.ripe.net*) echo '{"country":"TR"}';;
+            (*ipinfo.io/widget*) echo '{"data":{"org":"AS64500 Test"}}';;
+        esac
+    }
+    gr_svc() {
+        case "$1" in
+            (jetbrains|microsoft) echo US;;
+            (gemini|youtube_premium|spotify_signup|disney_access|reddit_guest) echo Да;;
+            (google_captcha) echo Нет;;
+            (*) echo BG;;
+        esac
+    }
     gr_cdn() { echo "BG (SOF)"; }
-    gr_geoip() { case "$1" in ifconfig) echo US;; ripe) echo TR;; *) echo BG;; esac; }
+    gr_geoip() {
+        case "$1" in
+            (ifconfig) echo US;;
+            (ripe) echo TR;;
+            (*) echo BG;;
+        esac
+    }
     geocheck_run --full 2>&1 )
 grep -q 'Страна (IPv4): BG — так видят 15 из 16; по реестру TR' <<<"$geo_out" && pass "эталон — страна большинства гео-баз (BG), реестр (TR) — пометкой" || fail "эталон GeoCheck" "$geo_out"
 odd=$(sed -n '/^Видят другую страну/,/^!/p' <<<"$geo_out")
