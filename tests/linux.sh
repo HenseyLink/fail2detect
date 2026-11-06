@@ -1138,7 +1138,7 @@ else
     # так ломался сервер: тысячи UDP-портов разрывали набор переводом строки
     PUBLIC_UDP="$(seq 40000 46000 | paste -sd' ' -) 51820 6000-6007 6005-6010"
     fw_render > "$WORK/r.nft"; check "тысячи портов — диапазонами, одной строкой" nft -c -f "$WORK/r.nft"
-    grep -q 'pub_udp .*elements = { 6000-6010,40000-46000,51820 }' "$WORK/r.nft" && pass "pub_udp: 6000-6010,40000-46000,51820" || fail "pub_udp диапазоны" "$(grep pub_udp "$WORK/r.nft")"
+    grep -q 'pub_udp .*elements = { 443,6000-6010,40000-46000,51820 }' "$WORK/r.nft" && pass "pub_udp: 443 (Xray), 6000-6010, 40000-46000, 51820" || fail "pub_udp диапазоны" "$(grep pub_udp "$WORK/r.nft")"
     PUBLIC_UDP="51820"
 
     section "Применение и состояние"
