@@ -254,7 +254,9 @@ grep -q 'DELETE .*"address":"203.0.113.10"' "$DNSW/log" && [[ "$(cat "$DNSW/rec_
 [[ "$(_ss_rel example.com example.com)|$(_ss_rel a.b.example.com example.com)" == "@|a.b" ]] && pass "Spaceship: имена @ и a.b" || fail "_ss_rel"
 # установка: домен не на сервере → предложение, запись, ожидание DNS
 rm -f "$DNSW"/rec_*
-_t_install() { public_ip() { echo 203.0.113.30; }; getent() { :; }; ask() { REPLY=Node1.Example.com; }
+# настоящий ask_domain: выше в тестах его подменяют и убирают
+# shellcheck source=/dev/null
+_t_install() { source "$ROOT/lib/installer.sh"; public_ip() { echo 203.0.113.30; }; getent() { :; }; ask() { REPLY=Node1.Example.com; }
     ask_domain "Домен ноды"; echo "REPLY=$REPLY"; }
 out=$(F2D_ASSUME_YES=1 dns_t cloudflare _t_install)
 [[ "$out" == *"REPLY=node1.example.com"* && "$(cat "$DNSW/rec_cf" 2>/dev/null)" == "r1 203.0.113.30" && "$out" == *"отвечает в публичном DNS"* ]] \
