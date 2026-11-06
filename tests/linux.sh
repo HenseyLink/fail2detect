@@ -21,7 +21,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; el
 section() { printf '\n== %s\n' "$1"; }
 
 # shellcheck source=/dev/null
-for m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality geocheck update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
+for m in common detect firewall jail transport certs site web dns remnawave balancer rurules installer remove backup panel setup ipquality geocheck update speedtest bench censorcheck; do source "$ROOT/lib/$m.sh"; done
 load_config
 GEO_LOOKUP=no
 
@@ -190,6 +190,76 @@ grep -q '^JetBrains  *US' <<<"$odd" && grep -q '^ifconfig.co  *US' <<<"$odd" && 
     && pass "расхождения — таблицей, без реестра RIPE и без «не TR»" || fail "таблица расхождений" "$odd"
 grep -q 'с другой страной: 3' <<<"$geo_out" && pass "итог: 3 сервиса с другой страной" || fail "итог расхождений" "$geo_out"
 unset geo_out odd
+
+section "DNS-записи: Cloudflare и Spaceship"
+# API имитирует curl: состояние записей — в файлах, запросы — в журнале
+DNSW="$WORK/dnsapi"; mkdir -p "$DNSW"
+_dns_fake_curl() {
+    local url="" method=GET data="" wcode=no a
+    while (($#)); do
+        case "$1" in -X) method="$2"; shift;; --data) data="$2"; shift;; -w) wcode=yes; shift;; -H|--max-time) shift;; http*) url="$1";; esac
+        shift
+    done
+    echo "$method $url $data" >> "$DNSW/log"
+    case "$url" in
+        *cloudflare-dns.com*|*dns.google*)   # DoH: что сейчас «опубликовано»
+            a=$(cat "$DNSW"/rec_* 2>/dev/null | awk '{print $2}' | head -1); echo "{\"Answer\":[{\"data\":\"$a\"}]}";;
+        *api.cloudflare.com*/user/tokens/verify) echo '{"success":true,"result":{"status":"active"}}';;
+        *api.cloudflare.com*"/zones?name=example.com") echo '{"success":true,"result":[{"id":"z1"}]}';;
+        *api.cloudflare.com*"/zones?name="*) echo '{"success":true,"result":[]}';;
+        *api.cloudflare.com*/dns_records\?type=*)
+            if [[ -f "$DNSW/rec_cf" ]]; then read -r id ip <"$DNSW/rec_cf"; echo "{\"success\":true,\"result\":[{\"id\":\"$id\",\"content\":\"$ip\",\"proxied\":false}]}"
+            else echo '{"success":true,"result":[]}'; fi;;
+        *api.cloudflare.com*/dns_records*)
+            [[ "$method" == POST || "$method" == PUT ]] && echo "r1 $(jq -r .content <<<"$data")" > "$DNSW/rec_cf"
+            echo '{"success":true,"result":{}}';;
+        *spaceship.dev*/dns/records/example.com*)
+            case "$method" in
+                GET) if [[ -f "$DNSW/rec_ss" ]]; then read -r _ ip <"$DNSW/rec_ss"; echo "{\"items\":[{\"type\":\"A\",\"name\":\"node1\",\"address\":\"$ip\"}],\"total\":1}"
+                     else echo '{"items":[],"total":0}'; fi; [[ $wcode == yes ]] && printf '\n200';;
+                PUT) echo "x $(jq -r '.items[0].address' <<<"$data")" > "$DNSW/rec_ss"; [[ $wcode == yes ]] && printf '\n204';;
+                DELETE) rm -f "$DNSW/rec_ss"; [[ $wcode == yes ]] && printf '\n204';;
+            esac;;
+        *spaceship.dev*) echo '{"detail":"not found"}'; [[ $wcode == yes ]] && printf '\n404';;
+    esac
+}
+dns_t() {   # провайдер команды… — в подоболочке, с подставным API и конфигом
+    ( curl() { _dns_fake_curl "$@"; }
+      DNS_CONF="$DNSW/conf/dns.conf"; CF_INI="$DNSW/conf/cloudflare.ini"; mkdir -p "$DNSW/conf"
+      DNS_WAIT_SECS=2
+      if [[ "$1" == cloudflare ]]; then printf 'dns_cloudflare_api_token = tok\n' > "$CF_INI"; printf 'DNS_PROVIDER=cloudflare\n' > "$DNS_CONF"
+      else printf 'DNS_PROVIDER=spaceship\nSS_KEY=k\nSS_SECRET=s\n' > "$DNS_CONF"; fi
+      shift; "$@" ) 2>&1
+}
+: > "$DNSW/log"
+out=$(dns_t cloudflare dns_set node1.example.com 203.0.113.10)
+[[ "$(cat "$DNSW/rec_cf" 2>/dev/null)" == "r1 203.0.113.10" ]] && grep -q 'POST .*/zones/z1/dns_records .*"proxied":false' "$DNSW/log" \
+    && pass "Cloudflare: зона найдена по поддомену, A-запись создана (DNS only)" || fail "Cloudflare: создание" "$out $(cat "$DNSW/log")"
+out=$(dns_t cloudflare dns_set node1.example.com 203.0.113.10)
+[[ "$out" == *"уже есть"* ]] && pass "Cloudflare: та же запись — без изменений" || fail "Cloudflare: повтор" "$out"
+out=$(F2D_ASSUME_YES=0 dns_t cloudflare dns_set node1.example.com 203.0.113.20 </dev/null)
+[[ "$(cat "$DNSW/rec_cf")" == "r1 203.0.113.10" && "$out" == *"заменить"* ]] && pass "Cloudflare: чужой IP без согласия не меняется" || fail "Cloudflare: замена без согласия" "$out"
+out=$(F2D_ASSUME_YES=1 dns_t cloudflare dns_set node1.example.com 203.0.113.20)
+[[ "$(cat "$DNSW/rec_cf")" == "r1 203.0.113.20" ]] && grep -q 'PUT .*/dns_records/r1' "$DNSW/log" && pass "Cloudflare: с согласием запись заменена (PUT)" || fail "Cloudflare: замена" "$out"
+_t_other_zone() { dns_set other.org 203.0.113.20 || echo "ERR=$DNS_ERR"; }
+out=$(dns_t cloudflare _t_other_zone)
+[[ "$out" == *"ERR=зоны для other.org нет"* ]] && pass "Cloudflare: чужая зона — понятная ошибка" || fail "Cloudflare: нет зоны" "$out"
+rm -f "$DNSW"/rec_*; : > "$DNSW/log"
+out=$(dns_t spaceship dns_set node1.example.com 203.0.113.10)
+[[ "$(cat "$DNSW/rec_ss" 2>/dev/null)" == "x 203.0.113.10" ]] && grep -q 'PUT https://spaceship.dev/api/v1/dns/records/example.com .*"name":"node1"' "$DNSW/log" \
+    && pass "Spaceship: зона example.com, запись node1 (имя без домена)" || fail "Spaceship: создание" "$out $(cat "$DNSW/log")"
+out=$(F2D_ASSUME_YES=1 dns_t spaceship dns_set node1.example.com 203.0.113.20)
+grep -q 'DELETE .*"address":"203.0.113.10"' "$DNSW/log" && [[ "$(cat "$DNSW/rec_ss")" == "x 203.0.113.20" ]] \
+    && pass "Spaceship: старая запись удалена, новая добавлена" || fail "Spaceship: замена" "$out"
+[[ "$(_ss_rel example.com example.com)|$(_ss_rel a.b.example.com example.com)" == "@|a.b" ]] && pass "Spaceship: имена @ и a.b" || fail "_ss_rel"
+# установка: домен не на сервере → предложение, запись, ожидание DNS
+rm -f "$DNSW"/rec_*
+_t_install() { public_ip() { echo 203.0.113.30; }; getent() { :; }; ask() { REPLY=Node1.Example.com; }
+    ask_domain "Домен ноды"; echo "REPLY=$REPLY"; }
+out=$(F2D_ASSUME_YES=1 dns_t cloudflare _t_install)
+[[ "$out" == *"REPLY=node1.example.com"* && "$(cat "$DNSW/rec_cf" 2>/dev/null)" == "r1 203.0.113.30" && "$out" == *"отвечает в публичном DNS"* ]] \
+    && pass "ask_domain: A-запись создана сама, домен дождался DNS" || fail "ask_domain + DNS" "$out"
+unset -f _dns_fake_curl dns_t _t_other_zone _t_install; unset DNSW
 
 section "Удаление: защита от лишнего"
 for bad in / /etc /opt /root /home "$WORK"; do

@@ -23,16 +23,22 @@ rand_alnum() { tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-32}"; }
 # пароль под требования панели: ≥24, есть A-Z, a-z, 0-9
 rand_password() { echo "$(rand_alnum 26)Aa1"; }
 
-ask_domain() {   # prompt -> REPLY
+# Домен должен указывать на этот сервер. Если нет — предлагаем создать
+# A-запись через API Cloudflare или Spaceship (lib/dns.sh); так — для панели,
+# ноды и страницы подписки, где бы их ни ставили.
+ask_domain() {   # prompt [default] -> REPLY
+    local dom me ip
     while true; do
         ask "$1" "${2:-}"
-        [[ "$REPLY" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || { warn "Это не похоже на домен"; continue; }
-        local me ip; me=$(public_ip); ip=$(getent ahostsv4 "$REPLY" 2>/dev/null | awk 'NR==1{print $1}')
+        dom="${REPLY,,}"
+        [[ "$dom" =~ ^([a-z0-9-]+\.)+[a-z]{2,}$ ]] || { warn "Это не похоже на домен"; continue; }
+        me=$(public_ip); ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk 'NR==1{print $1}')
         if [[ -n "$me" && "$ip" != "$me" ]]; then
-            warn "$REPLY указывает на ${ip:-ничего}, а IP сервера $me"
+            warn "$dom указывает на ${ip:-ничего}, а IP сервера $me"
+            if dns_offer "$dom" "$me"; then REPLY="$dom"; return 0; fi
             confirm "Продолжить всё равно (например, домен за Cloudflare)?" n || continue
         fi
-        return 0
+        REPLY="$dom"; return 0
     done
 }
 

@@ -1,6 +1,6 @@
 # fail2detect
 
-**Версия 1.1.1.** Обновление: `f2d update`, меню само сообщает о новой версии.
+**Версия 1.2.0.** Обновление: `f2d update`, меню само сообщает о новой версии.
 
 Защита нод и панели [Remnawave](https://github.com/remnawave) от сканеров РКН, активного зондирования и брутфорса.
 
@@ -103,6 +103,10 @@ fail2detect install sub       # страница подписки (на серв
   - **Свой сайт:** положите файлы в `/var/www/fail2detect` (`index.html` — главная, `404.html` — ошибка), fail2detect их не тронет. Новый случайный сайт: `fail2detect web site regen`.
   - Вместо своего сайта можно указать чужой (`www.example.com:443`).
 - **Сертификаты.** Сначала fail2detect ищет готовый сертификат: от certbot или от Caddy, если сервер ставили с Caddy (тогда порт 80 занят им, и выпускать второй сертификат не нужно). Если готового нет, выпускает через Let's Encrypt: HTTP-01 (порт 80 открывается на минуту) или Cloudflare DNS. Если выбранный способ не сработал, скрипт сразу предложит другой. Сменить способ можно командой `fail2detect cert method`, посмотреть сертификаты — `fail2detect cert list`. Продлённый сертификат (certbot или Caddy) сам копируется в ноду (`/etc/xray-certs`).
+- **DNS-записи.** Если домен панели, ноды или страницы подписки ещё не указывает на сервер, fail2detect предлагает создать A-запись через API Cloudflare или Spaceship. Затем он ждёт, пока запись появится в публичном DNS, и только потом выпускает сертификат. Предложение появляется в любом варианте установки: панель, панель с подпиской и нодой, отдельная нода, отдельная страница подписки. Подключить провайдера заранее: `fail2detect dns setup` или меню «Установка → DNS-записи».
+  - **Cloudflare:** API-токен с правом Zone → DNS → Edit (шаблон «Edit zone DNS»). Это тот же токен, что для сертификатов через Cloudflare DNS. Запись создаётся без прокси (DNS only): через прокси Cloudflare Reality и Hysteria не работают.
+  - **Spaceship:** API-ключ и секрет из API Manager с правами `dnsrecords:read` и `dnsrecords:write`. DNS домена должен обслуживать Spaceship (его NS).
+  - Если запись уже ведёт на другой IP, fail2detect спросит, прежде чем её менять. Вручную: `f2d dns set <домен> [IP]`, `f2d dns get <домен>`, `f2d dns list <зона>`, `f2d dns remove <домен>`.
 - **Панель** скрыта за секретным ключом в ссылке входа: без него nginx рвёт соединение (444). API доступно по Bearer-токену.
 
 **Два режима установки ноды (`install node`):**
@@ -356,6 +360,7 @@ Rust-движок точнее: скачанные байты он считае�
 /var/lib/fail2detect/             баны, блок-листы, сгенерированные правила
 /var/log/fail2detect/audit.log    журнал аудита
 /etc/fail2detect/web.env          домены и ключ панели для nginx
+/etc/fail2detect/dns.conf         провайдер DNS и ключи Spaceship (токен Cloudflare — в cloudflare.ini)
 /opt/fail2detect-web/             nginx (панель, подписка, selfsteal)
 /opt/remnawave/  /opt/remnanode/  /opt/subscription/   Remnawave (стандартные пути)
 ```

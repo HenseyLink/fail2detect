@@ -9,7 +9,7 @@ F2D_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]
 F2D_HOME="$(cd "$(dirname "$F2D_BIN")" && pwd)"
 F2D_SHARE="$F2D_HOME"
 
-for _m in common detect firewall jail transport certs site web remnawave balancer rurules installer remove backup panel setup ipquality geocheck speedtest bench censorcheck update; do
+for _m in common detect firewall jail transport certs dns site web remnawave balancer rurules installer remove backup panel setup ipquality geocheck speedtest bench censorcheck update; do
     # shellcheck disable=SC1090
     source "$F2D_HOME/lib/$_m.sh" || { echo "fail2detect: нет модуля lib/$_m.sh" >&2; exit 1; }
 done
@@ -85,6 +85,12 @@ ${C_BOLD}Сертификаты${C_RESET}
   cert list                 найденные сертификаты (certbot и Caddy) и способ выпуска
   cert method               выбрать способ выпуска заново (HTTP-01 / Cloudflare DNS)
   cert issue <домен>        выпустить или найти сертификат для домена
+
+${C_BOLD}DNS-записи (Cloudflare / Spaceship API)${C_RESET}
+  dns setup                 подключить провайдера: при установке панели, ноды и подписки
+                            A-запись домена создастся сама
+  dns set <домен> [IP]      создать или обновить A/AAAA-запись (IP — по умолчанию этого сервера)
+  dns get <домен> | list <зона> | remove <домен> [A|AAAA] | status
 
 ${C_BOLD}Резервные копии и перенос панели${C_RESET}
   detect                    что найдено на сервере (панель, нода, подписка, контейнеры, демон)
@@ -388,11 +394,13 @@ menu_install() {
     menu_item 5 "Удалить ноду"
     menu_item 6 "Переустановить панель"
     menu_item 7 "Удалить панель"
+    menu_item 8 "DNS-записи: Cloudflare / Spaceship API$(dns_configured && echo " ${C_GRAY}($(dns_label))${C_RESET}")"
     menu_item 0 "Назад"
     ask "Выбор" ""
     case "$REPLY" in
         1) install_panel;; 2) install_node;; 3) install_sub;;
         4) reinstall_node;; 5) remove_node;; 6) reinstall_panel;; 7) remove_panel;;
+        8) menu_dns; return;;
         *) return;;
     esac
     pause
@@ -519,6 +527,7 @@ main() {
                         *) die "node add|transport|add-transport|panel-ip|ru-traffic|port|prepare|inbound-json|api-port|inbounds|logs";;
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
+        dns)        dns_cli "$@";;
         bench|benchmark) bench_run "$@";;
         detect|whoami) rw_detect_report;;
         backup|backups) backup_cli "$@";;
