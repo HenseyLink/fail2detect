@@ -326,6 +326,26 @@ grep -q 'add element inet fail2detect pub_tcp { 9443 }' "$nftlog" && grep -q 'pu
 unset -f nft detect_xray_ports detect_xray_udp_ports; eval "$stubs_save"   # заглушки теста, а не настоящий detect.sh
 config_set NODE_XRAY_PORTS "$xp_save"; load_config; : > "$F2D_BANS_DB"
 
+section "Исходящий UDP Xray — не порты сервера"
+# rw-core держит тысячи UDP-сокетов исходящих соединений клиентов (эфемерные порты)
+# shellcheck source=/dev/null
+udp_out=$( source "$ROOT/lib/detect.sh"   # настоящий detect_xray_udp_ports — выше его подменяют
+    ephemeral_ports() { echo "32768 60999"; }
+    ss() { [[ "$*" == *-ulnp* ]] || return 0
+        echo 'UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("rw-core",pid=1,fd=3))'
+        echo 'UNCONN 0 0 127.0.0.1:10085 0.0.0.0:* users:(("rw-core",pid=1,fd=4))'
+        seq 40000 45000 | awk '{print "UNCONN 0 0 0.0.0.0:" $1 " 0.0.0.0:* users:((\"rw-core\",pid=1,fd=9))"}'; }
+    detect_xray_udp_ports )
+[[ "$udp_out" == 443 ]] && pass "из 5000 UDP-сокетов Xray порт сервера — только 443" || fail "эфемерные UDP" "$(head -c 200 <<<"$udp_out")"
+xp_save="$NODE_XRAY_PORTS"; pu_save="$PUBLIC_UDP"
+config_set PUBLIC_UDP "51820"; config_set NODE_XRAY_PORTS "443/tcp 443/udp 40001/udp 40002/udp 51820/udp 2053/udp"
+( ephemeral_ports() { echo "32768 60999"; }; ufw_active() { false; }; xray_ports_prune >/dev/null 2>&1 ); load_config
+[[ "$NODE_XRAY_PORTS" == "443/tcp 443/udp 51820/udp 2053/udp" ]] && pass "накопленные эфемерные порты убраны из NODE_XRAY_PORTS, PUBLIC_UDP оставлен" \
+    || fail "чистка NODE_XRAY_PORTS" "$NODE_XRAY_PORTS"
+[[ "$(printf '%s\n' 443 80 81 82 22 | _port_ranges)|$(echo "1000-2000 1500-2500 2501,443" | _port_ranges)" == "22,80-82,443|443,1000-2501" ]] \
+    && pass "порты — одной строкой, подряд идущие и пересечения сливаются" || fail "_port_ranges"
+config_set NODE_XRAY_PORTS "$xp_save"; config_set PUBLIC_UDP "$pu_save"; load_config; unset udp_out xp_save pu_save
+
 section "Вопросы и e-mail для сертификата"
 REPLY="me@example.com"; confirm "ok?" n < <(printf 'y\n') >/dev/null 2>&1
 [[ "$REPLY" == me@example.com ]] && pass "confirm не затирает введённое ранее (REPLY)" || fail "confirm затёр REPLY" "$REPLY"
@@ -1115,6 +1135,11 @@ else
     TRUSTED_IPS="203.0.113.10 2001:db8::1 10.0.0.0/8"
     PUBLIC_TCP="8443 6000-6007"; PUBLIC_UDP="51820"
     fw_render > "$WORK/r.nft"; check "белый список, диапазоны портов, UDP" nft -c -f "$WORK/r.nft"
+    # так ломался сервер: тысячи UDP-портов разрывали набор переводом строки
+    PUBLIC_UDP="$(seq 40000 46000 | paste -sd' ' -) 51820 6000-6007 6005-6010"
+    fw_render > "$WORK/r.nft"; check "тысячи портов — диапазонами, одной строкой" nft -c -f "$WORK/r.nft"
+    grep -q 'pub_udp .*elements = { 6000-6010,40000-46000,51820 }' "$WORK/r.nft" && pass "pub_udp: 6000-6010,40000-46000,51820" || fail "pub_udp диапазоны" "$(grep pub_udp "$WORK/r.nft")"
+    PUBLIC_UDP="51820"
 
     section "Применение и состояние"
     STUB_MODE=nft FLOOD_GUARD=yes STEALTH_ICMP=yes DOCKER_GUARD=yes

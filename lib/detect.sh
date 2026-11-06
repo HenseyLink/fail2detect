@@ -139,27 +139,38 @@ compose_service_block() {   # файл сервис [образ]
 detect_ssh_ports() {
     [[ -n "$SSH_PORTS" ]] && { echo "$SSH_PORTS"; return; }
     local p=""
-    have sshd && p=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -u | xargs)
-    [[ -z "$p" ]] && p=$(ss -H -tlnp 2>/dev/null | awk '/"sshd"/{n=split($4,a,":"); print a[n]}' | sort -u | xargs)
+    have sshd && p=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -u | paste -sd' ' -)
+    [[ -z "$p" ]] && p=$(ss -H -tlnp 2>/dev/null | awk '/"sshd"/{n=split($4,a,":"); print a[n]}' | sort -u | paste -sd' ' -)
     echo "${p:-22}"
 }
 
 # порты, которые слушает xray (rw-core/xray) снаружи
 detect_xray_ports() {
     [[ -n "$XRAY_PORTS" ]] && { echo "$XRAY_PORTS"; return; }
-    ss -H -tlnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
+    ss -H -tlnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | paste -sd' ' -
 }
 
 # Порты, на которых СНАРУЖИ слушают веб-серверы (Caddy, nginx, Apache, HAProxy).
 # Сайты, панели, прокси: в режиме nft их нельзя закрывать. Раньше открытыми
 # оставались только SSH, Xray и 443, и порт 80 у работающего веб-сервера закрывался.
 detect_web_ports() {
-    ss -H -tlnp 2>/dev/null | awk '/"(caddy|nginx|apache2|httpd|haproxy|lighttpd)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
+    ss -H -tlnp 2>/dev/null | awk '/"(caddy|nginx|apache2|httpd|haproxy|lighttpd)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | paste -sd' ' -
 }
 
-# UDP-порты Xray (Hysteria 2)
+# эфемерный диапазон: из него ядро выдаёт порты исходящим соединениям
+ephemeral_ports() {   # -> "низ верх"
+    local r; r=$(tr -s '\t ' ' ' < /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null)
+    [[ "$r" =~ ^[0-9]+\ [0-9]+$ ]] && echo "$r" || echo "32768 60999"
+}
+
+# UDP-порты Xray (Hysteria 2). UDP-сокет без соединения — это и inbound, и
+# исходящий UDP клиентов (DNS, QUIC, игры) на порту из эфемерного диапазона.
+# Вторые — не порты сервера: раньше они открывались тысячами и ломали правила.
+# Inbound на порту из этого диапазона задайте в PUBLIC_UDP.
 detect_xray_udp_ports() {
-    ss -H -ulnp 2>/dev/null | awk '/"(xray|rw-core)"/{n=split($4,a,":"); if ($4 !~ /^127\.|^\[::1\]/) print a[n]}' | sort -un | xargs
+    local lo hi; read -r lo hi <<<"$(ephemeral_ports)"
+    ss -H -ulnp 2>/dev/null | awk -v lo="$lo" -v hi="$hi" '/"(xray|rw-core)"/{n=split($4,a,":"); p=a[n]+0
+        if ($4 !~ /^127\.|^\[::1\]/ && (p < lo || p > hi)) print p}' | sort -un | paste -sd' ' -
 }
 
 # IP панели: из конфига, иначе из правил UFW для порта ноды (так их задают установщики)
@@ -167,7 +178,7 @@ detect_panel_ips() {
     [[ -n "$PANEL_IPS" ]] && { echo "$PANEL_IPS"; return; }
     local port; port=$(detect_node_api_port) || return 0
     have ufw || return 0
-    ufw status 2>/dev/null | awk -v p="$port" '$1==p || $1==p"/tcp" {for(i=2;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) print $i}' | sort -u | xargs
+    ufw status 2>/dev/null | awk -v p="$port" '$1==p || $1==p"/tcp" {for(i=2;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) print $i}' | sort -u | paste -sd' ' -
 }
 
 # вывод читаем целиком: «ufw status | grep -q» с pipefail ложно давал «выключен»

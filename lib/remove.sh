@@ -47,7 +47,7 @@ remove_node() {   # [--reinstall]
     local xp=(); read -ra xp <<<"$NODE_XRAY_PORTS"
     local ports; ports=$( { ((${#xp[@]})) && printf '%s\n' "${xp[@]}"
         for p in $(detect_xray_ports); do echo "$p/tcp"; done
-        for p in $(detect_xray_udp_ports); do echo "$p/udp"; done; } | grep . | sort -u | xargs)
+        for p in $(detect_xray_udp_ports); do echo "$p/udp"; done; } | grep . | sort -u | paste -sd' ' -)
     local api; api=$(detect_node_api_port 2>/dev/null)
 
     title "$([[ $reinstall == yes ]] && echo "Переустановка" || echo "Удаление") ноды Remnawave"

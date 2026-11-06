@@ -62,7 +62,7 @@ fw_public_tcp() {
     fi
     # API ноды никогда не публичный
     local api; api=$(has_node && detect_node_api_port)
-    printf '%s\n' "${p[@]}" | grep -vx "${api:-__none__}" | sort -un | xargs
+    printf '%s\n' "${p[@]}" | grep -vx "${api:-__none__}" | sort -un | paste -sd' ' -
 }
 
 fw_public_udp() {
@@ -73,7 +73,7 @@ fw_public_udp() {
     if [[ "$(fw_mode)" == ufw ]]; then
         while read -r proto x; do [[ "$proto" == udp ]] && p+=("$x"); done < <(ufw_open_ports)
     fi
-    ((${#p[@]})) && printf '%s\n' "${p[@]}" | sort -un | xargs
+    ((${#p[@]})) && printf '%s\n' "${p[@]}" | sort -un | paste -sd' ' -
 }
 
 # элементы набора через запятую, отдельно v4/v6
@@ -87,6 +87,18 @@ _ips() {   # family list...
 }
 _elements() { [[ -n "$1" ]] && printf ' elements = { %s };' "$1"; }
 
+# порты (через пробел, запятую или с новой строки; «a-b» — диапазон) -> одна
+# строка «22,80-85,443»: подряд идущие сворачиваются, пересечения сливаются.
+# Наборы с flags interval не принимают пересекающиеся диапазоны.
+_port_ranges() {
+    tr ',' ' ' | tr ' ' '\n' | awk -F- 'NF && $1 ~ /^[0-9]+$/ { lo = $1 + 0; hi = (NF > 1 && $2 ~ /^[0-9]+$/) ? $2 + 0 : lo
+        if (hi < lo) { t = lo; lo = hi; hi = t }; print lo, hi }' | sort -n -k1,1 -k2,2 \
+    | awk 'NR == 1 { a = $1; b = $2; next }
+           $1 <= b + 1 { if ($2 > b) b = $2; next }
+           { out = out (out ? "," : "") (a == b ? a : a "-" b); a = $1; b = $2 }
+           END { if (NR) { out = out (out ? "," : "") (a == b ? a : a "-" b); print out } }'
+}
+
 # ---------- генерация правил ----------
 # порты Xray этой ноды — баны их не закрывают (см. BAN_SCOPE)
 fw_xray_ports() {   # tcp|udp -> "443,8443"
@@ -96,15 +108,15 @@ fw_xray_ports() {   # tcp|udp -> "443,8443"
         if [[ "$l4" == tcp ]]; then for p in $(detect_xray_ports); do out+=("$p"); done
         else for p in $(detect_xray_udp_ports); do out+=("$p"); done; fi
     fi
-    ((${#out[@]})) && printf '%s\n' "${out[@]}" | sort -un | paste -sd, -
+    ((${#out[@]})) && printf '%s\n' "${out[@]}" | _port_ranges
 }
 
 fw_render() {
     local mode tcp udp api wan trusted4 trusted6 panel4 panel6 xtcp xudp
     mode=$(fw_mode)
     xtcp=$(fw_xray_ports tcp); xudp=$(fw_xray_ports udp)
-    tcp=$(fw_public_tcp | tr ' ' ',')
-    udp=$(fw_public_udp | tr ' ' ',')
+    tcp=$(fw_public_tcp | _port_ranges)
+    udp=$(fw_public_udp | _port_ranges)
     api=""; has_node && api=$(detect_node_api_port)
     wan=$(wan_iface)
     local panels; panels=$(detect_panel_ips)
@@ -274,6 +286,7 @@ fw_apply() {   # [--safe]
 
 _fw_apply_locked() {
     local new; new=$(mktemp "$F2D_STATE_DIR/fail2detect.nft.XXXXXX") || return 1
+    xray_ports_prune
     fw_render > "$new"
     if ! nft -c -f "$new" 2>"$new.err"; then
         err "Ошибка в сгенерированных правилах:"; cat "$new.err" >&2
@@ -348,12 +361,43 @@ fw_status() {
     printf '  %-26s %s\n' "Анти-флуд:" "$FLOOD_GUARD$( [[ $FLOOD_GUARD == yes ]] && echo " ($FLOOD_RATE)")"
 }
 
+# До 1.2.1 демон принимал исходящие UDP-сокеты Xray (порты из эфемерного
+# диапазона) за новые inbound'ы: дописывал их в NODE_XRAY_PORTS и открывал,
+# с UFW — ещё и правилами «Xray (auto)». Записи убираем сразу; правила UFW —
+# понемногу из демона (ufw медленный, запуск службы ждать не должен).
+F2D_UFW_PRUNE="${F2D_STATE_DIR}/ufw-prune-udp"
+xray_ports_prune() {
+    local lo hi x p kept=() drop=()
+    read -r lo hi <<<"$(ephemeral_ports)"
+    for x in $NODE_XRAY_PORTS; do
+        p="${x%/*}"
+        if [[ "${x#*/}" == udp && "$p" =~ ^[0-9]+$ ]] && (( p >= lo && p <= hi )) && [[ " $PUBLIC_UDP " != *" $p "* ]]; then drop+=("$p")
+        else kept+=("$x"); fi
+    done
+    ((${#drop[@]})) || return 0
+    config_set NODE_XRAY_PORTS "${kept[*]}"
+    ufw_active && printf '%s\n' "${drop[@]}" >> "$F2D_UFW_PRUNE"
+    audit_write PORT_CLOSE - xray - "Закрыто ${#drop[@]} эфемерных UDP-портов: исходящие соединения Xray, ошибочно открытые как inbound"
+    info "Закрыто ${#drop[@]} UDP-портов, ошибочно открытых как порты Xray (исходящие соединения)"
+}
+
+# по 40 правил UFW за раз (демон зовёт каждые 30 с)
+ufw_prune_step() {
+    [[ -s "$F2D_UFW_PRUNE" ]] || return 0
+    ufw_active || { rm -f "$F2D_UFW_PRUNE"; return 0; }
+    local p
+    head -40 "$F2D_UFW_PRUNE" | while read -r p; do [[ -n "$p" ]] && ufw --force delete allow "$p/udp" >/dev/null 2>&1; done
+    sed -i '1,40d' "$F2D_UFW_PRUNE"
+    [[ -s "$F2D_UFW_PRUNE" ]] || rm -f "$F2D_UFW_PRUNE"
+}
+
 # Панель может прислать ноде новый inbound в любой момент (другой порт,
 # Hysteria на UDP). Раньше список портов снимался только при применении
 # правил: новый порт оставался закрытым, клиентов дропало, а portscan их
 # банил. Демон вызывает это каждые 30 с и сразу открывает новые порты Xray.
 xray_ports_sync() {
     has_node || return 0
+    xray_ports_prune; ufw_prune_step
     local p l4 added=()
     while read -r l4 p; do
         [[ -n "$p" ]] || continue
