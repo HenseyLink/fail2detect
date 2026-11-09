@@ -1,6 +1,6 @@
 [package]
 name = "f2d-speed"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "fail2detect: Cloudflare Speedtest с живым дашбордом"

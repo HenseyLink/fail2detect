@@ -99,6 +99,34 @@ _port_ranges() {
            END { if (NR) { out = out (out ? "," : "") (a == b ? a : a "-" b); print out } }'
 }
 
+# IPv4-сети блок-листов (по одной в строке) -> без пересечений, по одной в строке.
+# Разные списки дают одну сеть по-разному (/24 в одном, /28 внутри неё в
+# другом, адрес с ненулевыми битами хоста) — nft на таком отвечает
+# «conflicting intervals specified» / «File exists», и правила не применяются.
+# Вложенные и смежные сети сливаются; результат — адрес, CIDR или «a-b».
+_cidr4_merge() {
+    awk -F/ '
+        function ip2n(s,   o) { split(s, o, "."); return ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4] }
+        $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+            len = (NF > 1 && $2 ~ /^[0-9]+$/) ? $2 + 0 : 32
+            if (len > 32) next
+            size = 2 ^ (32 - len); lo = ip2n($1); lo -= lo % size
+            printf "%.0f %.0f\n", lo, lo + size - 1
+        }' | sort -n -k1,1 -k2,2 | awk '
+        function n2ip(n) { return sprintf("%d.%d.%d.%d", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256) }
+        function emit(a, b,   size, len) {
+            if (a == b) { print n2ip(a); return }
+            size = b - a + 1; len = 32
+            while (size > 1 && size % 2 == 0) { size /= 2; len-- }
+            if (size == 1 && a % (b - a + 1) == 0) print n2ip(a) "/" len
+            else print n2ip(a) "-" n2ip(b)
+        }
+        NR == 1 { a = $1; b = $2; next }
+        $1 <= b + 1 { if ($2 > b) b = $2; next }
+        { emit(a, b); a = $1; b = $2 }
+        END { if (NR) emit(a, b) }'
+}
+
 # ---------- генерация правил ----------
 # порты Xray этой ноды — баны их не закрывают (см. BAN_SCOPE)
 fw_xray_ports() {   # tcp|udp -> "443,8443"
@@ -261,12 +289,14 @@ fw_render_elements() {
     local f
     for f in 4 6; do
         [[ -s "$F2D_STATE_DIR/blocklist$f.txt" ]] || continue
-        # пачками по 500 элементов
-        awk -v tb="$F2D_NFT_TABLE" -v f="$f" '
+        # пачками по 500 элементов; IPv4 — без пересечений (файл мог остаться от
+        # прежней версии, где сети разных списков не сливались)
+        { if [[ $f == 4 ]]; then _cidr4_merge < "$F2D_STATE_DIR/blocklist4.txt"; else cat "$F2D_STATE_DIR/blocklist6.txt"; fi; } \
+        | awk -v tb="$F2D_NFT_TABLE" -v f="$f" '
             { buf = buf (n ? ", " : "") $1; n++ }
             n==500 { printf "add element inet %s block%s { %s }\n", tb, f, buf; buf=""; n=0 }
             END { if (n) printf "add element inet %s block%s { %s }\n", tb, f, buf }
-        ' "$F2D_STATE_DIR/blocklist$f.txt"
+        '
     done
 }
 
@@ -515,7 +545,7 @@ blocklist_update() {
         is_ipv4 "$c" || continue
         [[ "$c" == */* ]] && (( ${c#*/} < 16 )) && continue
         [[ "$keep" != *" ${c%/32} "* ]] && echo "$c"
-    done > "$F2D_STATE_DIR/blocklist4.txt"
+    done | _cidr4_merge > "$F2D_STATE_DIR/blocklist4.txt"
     sort -u "$tmp6" | while read -r c; do [[ "$c" == */* ]] && (( ${c#*/} < 32 )) && continue; echo "$c"; done > "$F2D_STATE_DIR/blocklist6.txt"
     wide=$(( $(sort -u "$tmp4" "$tmp6" | wc -l) - $(cat "$F2D_STATE_DIR"/blocklist{4,6}.txt | wc -l) ))
     (( wide > 0 )) && info "Отброшено $wide записей (слишком крупные сети, свои/доверенные адреса)"

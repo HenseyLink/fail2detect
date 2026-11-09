@@ -344,6 +344,10 @@ config_set PUBLIC_UDP "51820"; config_set NODE_XRAY_PORTS "443/tcp 443/udp 40001
     || fail "чистка NODE_XRAY_PORTS" "$NODE_XRAY_PORTS"
 [[ "$(printf '%s\n' 443 80 81 82 22 | _port_ranges)|$(echo "1000-2000 1500-2500 2501,443" | _port_ranges)" == "22,80-82,443|443,1000-2501" ]] \
     && pass "порты — одной строкой, подряд идущие и пересечения сливаются" || fail "_port_ranges"
+# блок-листы пересекаются (/24 в одном, /28 внутри неё в другом) — nft: «conflicting intervals»
+m=$(printf '%s\n' 1.2.3.0/24 1.2.3.16/28 1.2.3.5 5.6.7.8 5.6.7.9 10.0.0.5/24 10.0.1.0/24 109.124.95.224/30 109.124.95.228/30 192.168.0.0/23 192.168.2.0/24 | _cidr4_merge | tr '\n' ' ')
+[[ "$m" == "1.2.3.0/24 5.6.7.8/31 10.0.0.0/23 109.124.95.224/29 192.168.0.0-192.168.2.255 " ]] \
+    && pass "блок-листы: вложенные и смежные сети сливаются, биты хоста обнуляются" || fail "_cidr4_merge" "$m"
 config_set NODE_XRAY_PORTS "$xp_save"; config_set PUBLIC_UDP "$pu_save"; load_config; unset udp_out xp_save pu_save
 
 section "Вопросы и e-mail для сертификата"
@@ -1158,6 +1162,13 @@ else
     ls "$F2D_STATE_DIR"/fail2detect.nft.?????? >/dev/null 2>&1 && fail "остались временные файлы правил" || pass "временные файлы убраны"
     n=$(nft -j list set inet fail2detect block4 | jq '[.nftables[].set.elem // empty | .[]] | length')
     [[ "$n" == 1200 ]] && pass "блок-лист: 1200 подсетей (пачками по 500)" || fail "блок-лист" "в наборе $n вместо 1200"
+    # как у клиента: antiscanner, skipa и government дают пересекающиеся сети
+    cp "$F2D_STATE_DIR/blocklist4.txt" "$WORK/bl4.keep"
+    printf '%s\n' 109.124.95.224/30 109.124.95.0/24 109.124.95.228/30 109.124.95.230 37.29.55.192/30 37.29.55.193 \
+        >> "$F2D_STATE_DIR/blocklist4.txt"
+    fw_render > "$WORK/ov.nft"; check "пересекающиеся сети блок-листов принимаются nft" nft -c -f "$WORK/ov.nft"
+    check "и применяются" fw_apply
+    cp "$WORK/bl4.keep" "$F2D_STATE_DIR/blocklist4.txt"; fw_apply >/dev/null
     nft list set inet fail2detect pub_tcp | grep -q 2233 && pass "SSH-порт в pub_tcp" || fail "SSH-порт в pub_tcp"
     nft list set inet fail2detect pub_tcp | grep -q 2222 && fail "API ноды попал в публичные порты" || pass "API ноды не публичный"
 
