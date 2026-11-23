@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Установщик fail2detect:
+#   bash <(curl -fsSL https://gitlab.com/melodiceo/fail2detect/-/raw/main/install.sh)
 #   bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/install.sh)
 set -euo pipefail
 
+GITLAB_REPO="${F2D_GITLAB_REPO:-melodiceo/fail2detect}"
 REPO="${F2D_REPO:-HenseyLink/fail2detect}"
 BRANCH="${F2D_BRANCH:-main}"
 DEST="/opt/fail2detect"
@@ -26,7 +28,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 if [[ -n "$SRC_DIR" && -f "$SRC_DIR/fail2detect" && -d "$SRC_DIR/lib" ]]; then
     cp -a "$SRC_DIR/." "$tmp/src"   # установка из локальной копии репозитория
 else
-    curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" -o "$tmp/f2d.tgz"
+    curl -fsSL --connect-timeout 5 --max-time 30 "https://gitlab.com/${GITLAB_REPO}/-/archive/${BRANCH}/fail2detect-${BRANCH}.tar.gz" -o "$tmp/f2d.tgz" 2>/dev/null \
+        || curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" -o "$tmp/f2d.tgz"
     mkdir -p "$tmp/src"; tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1
 fi
 for f in "$tmp/src/fail2detect" "$tmp/src"/lib/*.sh; do bash -n "$f" || { red "Повреждён файл: $f"; exit 1; }; done

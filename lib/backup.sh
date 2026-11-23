@@ -442,8 +442,8 @@ panel_migrate() {   # --to user@host [-p порт]
     local f="$BACKUP_LAST" name; name=$(basename "$f")
     ok "Копия: $(_bk_human "$(wc -c < "$f")")"
     info "Ставлю (или обновляю) fail2detect на ${to}…"
-    # shellcheck disable=SC2029  # F2D_REPO — намеренно с этой стороны
-    ssh "${ssh_opts[@]}" "$to" "if command -v fail2detect >/dev/null; then fail2detect update >/dev/null; else bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)\" -- --no-setup; fi" \
+    # shellcheck disable=SC2029  # F2D_RAW_URL / F2D_RAW_FALLBACK — намеренно с этой стороны
+    ssh "${ssh_opts[@]}" "$to" "if command -v fail2detect >/dev/null; then fail2detect update >/dev/null; else bash -c \"\$(curl -fsSL ${F2D_RAW_URL}/install.sh 2>/dev/null || curl -fsSL ${F2D_RAW_FALLBACK}/install.sh)\" -- --no-setup; fi" \
         || { rm -rf "$tmp"; die "Не удалось установить fail2detect на $to"; }
     info "Передаю копию…"
     scp "${ssh_opts[@]/#-p/-P}" "$f" "$to:/root/$name" || { rm -rf "$tmp"; die "Копия не передана"; }

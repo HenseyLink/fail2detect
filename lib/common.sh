@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # fail2detect — общие функции: цвета, вывод, конфиг, зависимости.
 
-F2D_VERSION="1.2.2"
+F2D_VERSION="1.2.3"
 F2D_REPO="${F2D_REPO:-HenseyLink/fail2detect}"
+F2D_GITLAB_REPO="${F2D_GITLAB_REPO:-melodiceo/fail2detect}"
+F2D_RAW_URL="${F2D_RAW_URL:-https://gitlab.com/${F2D_GITLAB_REPO}/-/raw/main}"
+F2D_RAW_FALLBACK="https://raw.githubusercontent.com/${F2D_REPO}/main"
 
 F2D_CONF_DIR="${F2D_CONF_DIR:-/etc/fail2detect}"
 F2D_CONF="${F2D_CONF_DIR}/fail2detect.conf"
@@ -178,6 +181,8 @@ config_defaults() {
     PUBLIC_UDP=""
     XRAY_PORTS=""               # пусто = автоопределение
     NODE_API_PORT=""            # пусто = из docker-compose ноды
+    NODE_API_REDIRECT=""        # порты (80 443), с которых соединения от PANEL_IPS заворачиваются на NODE_API_PORT
+    NODE_CORE="both"            # both (Xray + Mihomo) | xray | mihomo
     PANEL_IPS=""                # IP панели (доступ к NODE_PORT)
     TRUSTED_IPS=""              # белый список (админ, мониторинг)
     STEALTH_ICMP="yes"          # не отвечать на ping

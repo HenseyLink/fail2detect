@@ -75,7 +75,12 @@ ${C_BOLD}Нода Remnawave${C_RESET}
                             подготовить сервер ноды к транспорту (сертификат, сайт, фаервол)
   node inbound-json <транспорт> <порт> [домен] [target]
                             JSON inbound'а для ручной вставки в профиль
+  node core [both|xray|mihomo|status] [--profile ИМЯ|№ … | --all]
+                            ядро клиентов для нод: Xray + Mihomo (оба сразу), только Xray или только Mihomo
   node api-port <порт>      сменить NODE_PORT (API ноды, по умолчанию 2222)
+  node api-redirect [80|443|80,443|off|status] [--panel-port 80|443|2222]
+                            редирект портов 80/443 → NODE_PORT только для IP панели (если хостер
+                            панели блокирует исходящие соединения на порт 2222)
   node inbounds             список inbound'ов и портов
   node logs                 включить лог Xray для jail reality
 
@@ -161,14 +166,17 @@ cmd_config() {
     [[ "$1" == RW_API_URL ]] && rw_normalize_url
     case "$1" in *TOKEN*|*COOKIE*|*_KEY) ok "$1 задан";; *) ok "$1=${!1}";; esac
     case "$1" in
-        FW_MODE|SSH_PORTS|PUBLIC_*|XRAY_PORTS|NODE_API_PORT|PANEL_IPS|TRUSTED_IPS|STEALTH_ICMP|DOCKER_GUARD|FLOOD_*) fw_apply;;
+        FW_MODE|SSH_PORTS|PUBLIC_*|XRAY_PORTS|NODE_API_PORT|NODE_API_REDIRECT|PANEL_IPS|TRUSTED_IPS|STEALTH_ICMP|DOCKER_GUARD|FLOOD_*) fw_apply;;
     esac
 }
 
 cmd_update() {
     require_root
     info "Обновляю fail2detect…"
-    curl -fsSL "https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh" | bash -s -- --update
+    local script
+    script=$(curl -fsSL --connect-timeout 5 --max-time 15 "${F2D_RAW_URL}/install.sh" 2>/dev/null \
+        || curl -fsSL --connect-timeout 5 --max-time 15 "${F2D_RAW_FALLBACK}/install.sh") || return 1
+    bash -s -- --update <<<"$script"
 }
 
 cmd_uninstall() {
@@ -313,6 +321,8 @@ menu_node() {
         menu_item 7 "Добавить запасные транспорты к ноде"
         menu_item 8 "Балансировщик «Авто» (лучшая нода по пингу, белые списки)"
         menu_item 9 "Российский трафик: обход в подписке / блок на нодах"
+        menu_item 10 "Ядро клиентов: Xray / Mihomo / оба сразу"
+        menu_item 11 "Обход блокировки порта API ноды (2222) через 80/443"
         menu_item 0 "Назад"
         ask "Выбор" ""
         case "$REPLY" in
@@ -338,6 +348,16 @@ menu_node() {
                         if confirm "С IP-сетями России из RIPE (не зависит от гео-баз GitHub)?" y; then node_ru_traffic "$pol" --ripe; else node_ru_traffic "$pol" --no-ripe; fi;;
                    4) node_ru_traffic bypass-off;; 5) node_ru_traffic off;; 6) node_ru_traffic update;;
                esac;;
+            10) node_core status
+                echo
+                echo "   1. ${C_BOLD}Xray + Mihomo${C_RESET} — оба ядра сразу (универсальная совместимость)"
+                echo "   2. Только Xray   (Happ/Xray, v2rayNG, Streisand, v2rayN)"
+                echo "   3. Только Mihomo (Clash Meta, FlClash, Koala Clash, Happ/Mihomo)"
+                ask "Вариант" ""
+                case "$REPLY" in
+                    1) node_core both;; 2) node_core xray;; 3) node_core mihomo;;
+                esac;;
+            11) node_api_redirect;;
             0|q|"") return;;
         esac
         pause
@@ -521,10 +541,12 @@ main() {
                         prepare) shift; node_prepare_cli "$@";;
                         inbound-json) node_inbound_json "${2:-}" "${3:-443}" "${4:-}" "${5:-}";;
                         port) node_port_change "${2:?порт}" "${3:-}";;
+                        core) shift; node_core "$@";;
                         api-port) node_api_port_change "${2:?порт}";;
+                        api-redirect|redirect) shift; node_api_redirect "$@";;
                         inbounds) rw_show_inbounds;;
                         logs) node_logs_enable;;
-                        *) die "node add|transport|add-transport|panel-ip|ru-traffic|port|prepare|inbound-json|api-port|inbounds|logs";;
+                        *) die "node add|transport|add-transport|core|panel-ip|ru-traffic|port|prepare|inbound-json|api-port|api-redirect|inbounds|logs";;
                     esac;;
         balancer|bal) balancer_cli "${1:-status}";;
         dns)        dns_cli "$@";;

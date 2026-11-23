@@ -584,3 +584,229 @@ EOF
         info "На нодах включите jail: fail2detect jail enable reality"
     fi
 }
+
+# ---------- ядро клиентов: Xray, Mihomo или оба сразу ----------
+# Определить текущую совместимость профиля по его конфигу и исключениям хостов.
+node_core_of() {   # config_json [exclude_sub_types_json] → both | xray | mihomo
+    local ex="${2:-[]}"
+    jq -r --argjson ex "$ex" '
+        [(.inbounds // [])[] | select(.streamSettings.security == "reality")] as $rel
+        | if ($ex | index("XRAY_JSON")) != null and ($ex | index("XRAY_BASE64")) != null then "mihomo"
+          elif ($ex | index("MIHOMO")) != null then "xray"
+          elif ($rel | length) > 0 and ([$rel[] | select((.streamSettings.network // "tcp") == "raw")] | length) > 0 then "xray"
+          else "both" end' <<<"$1"
+}
+
+# Перевести inbound'ы профиля под выбранное ядро клиентов:
+#   both / mihomo — network: "tcp" для tcp-reality (Mihomo отвергает "raw", Xray понимает оба)
+#                   и minClientVer: "0.0.0" в realitySettings (Xray 26.3.27+ иначе может отбить Mihomo)
+#   xray          — network: "raw" для tcp-reality
+node_core_apply_config() {   # config_json core(both|xray|mihomo)
+    jq -c --arg c "$2" '
+        .inbounds = ((.inbounds // []) | map(
+            if (.streamSettings.security // "") == "reality" then
+                (if ((.streamSettings.network // "tcp") | (. == "tcp" or . == "raw")) then
+                    .streamSettings.network = (if $c == "xray" then "raw" else "tcp" end)
+                 else . end)
+                | (if $c == "xray" then del(.streamSettings.realitySettings.minClientVer)
+                   else .streamSettings.realitySettings.minClientVer = "0.0.0" end)
+            else . end
+        ))' <<<"$1"
+}
+
+node_core() {   # [both|xray|mihomo|status] [--profile ИМЯ|№ … | --all]
+    local act="${1:-status}" all=0; shift || true
+    case "$act" in
+        both|all|оба) act=both;;
+        xray) act=xray;;
+        mihomo|clash) act=mihomo;;
+        status) ;;
+        *) die "node core both|xray|mihomo|status [--profile ИМЯ … | --all]";;
+    esac
+    local -a sel=()
+    while (($#)); do
+        case "$1" in
+            --all) all=1;;
+            --profile|-p) sel+=("${2:?имя профиля}"); shift;;
+            *) die "node core both|xray|mihomo|status [--profile ИМЯ … | --all]";;
+        esac; shift
+    done
+    rw_need_api || return 1
+    local profiles hosts
+    profiles=$(rw_api GET /api/config-profiles | jq -c '.response.configProfiles[]? | {uuid, name}')
+    [[ -n "$profiles" ]] || die "В панели нет профилей конфигурации"
+    hosts=$(rw_api GET /api/hosts | jq -c '.response // []')
+    if [[ "$act" == status ]]; then
+        title "Ядро клиентов в профилях нод"
+        local p u n cfg hex c i=0
+        while IFS= read -r p; do
+            i=$((i + 1)); u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
+            cfg=$(rw_api GET "/api/config-profiles/$u" | jq -c '.response.config // {}')
+            hex=$(jq -c --arg p "$u" '[.[] | select(.inbound.configProfileUuid == $p and ((.tags // []) | index("F2D_AUTO") | not)) | (.excludeFromSubscriptionTypes // [])] | first // []' <<<"$hosts")
+            c=$(node_core_of "$cfg" "$hex")
+            printf '  %s%2d.%s %-28s %s\n' "$C_YELLOW" "$i" "$C_RESET" "$n" "$(core_label "$c")"
+        done <<<"$profiles"
+        return 0
+    fi
+    require_root
+    local picked
+    picked=$(RU_PICK_WHAT="профилей" RU_PICK_FLAG=profile RU_PICK_HINT="Профили будут переведены на режим: $(core_label "$act")." \
+        _ru_pick_profiles "$profiles" "$all" "${sel[@]}") || return 1
+    local ex; ex=$(core_exclude_sub_types "$act")
+    local p u n full cfg new r done_names=()
+    while IFS= read -r p; do
+        u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
+        grep -qxF "$u" <<<"$picked" || continue
+        full=$(rw_api GET "/api/config-profiles/$u")
+        cfg=$(jq -c '.response.config // {}' <<<"$full")
+        local -A old_uuid=() new_uuid=()
+        local tag iu
+        while IFS=$'\t' read -r tag iu; do [[ -n "$tag" ]] && old_uuid[$tag]="$iu"; done < <(jq -r '.response.inbounds[]? | [.tag, .uuid] | @tsv' <<<"$full")
+        new=$(node_core_apply_config "$cfg" "$act")
+        r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$u" <<<"$new")")
+        if ! jq -e '.response.uuid' >/dev/null 2>&1 <<<"$r"; then
+            err "«${n}» не обновлён: $(jq -c '.message // .' <<<"$r" 2>/dev/null || echo "${RW_API_ERROR:-ошибка API}")"
+            continue
+        fi
+        while IFS=$'\t' read -r tag iu; do [[ -n "$tag" ]] && new_uuid[$tag]="$iu"; done < <(jq -r '.response.inbounds[]? | [.tag, .uuid] | @tsv' <<<"$r")
+        # если панель выдала новый uuid inbound'у после смены raw↔tcp — перепривязать ноды и squad'ы
+        for tag in "${!old_uuid[@]}"; do
+            local ou="${old_uuid[$tag]}" nu="${new_uuid[$tag]:-}"
+            if [[ -n "$nu" && "$nu" != "$ou" ]]; then
+                local node_u ai
+                while IFS=$'\t' read -r node_u ai; do
+                    rw_api PATCH /api/nodes "$(jq -n --arg u "$node_u" --arg p "$u" --argjson a "$ai" --arg o "$ou" --arg n "$nu" \
+                        '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:($a | map(if . == $o then $n else . end))}}')" >/dev/null
+                done < <(rw_api GET /api/nodes | jq -r --arg o "$ou" '.response[]? | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv')
+                squad_add_inbound "$nu" "$ou" >/dev/null 2>&1
+            fi
+        done
+        # обновить хосты этого профиля (кроме обёртки балансировщика F2D_AUTO)
+        local hu hrem hi niu
+        while IFS=$'\t' read -r hu hrem hi; do
+            [[ -n "$hu" ]] || continue
+            niu="$hi"
+            for tag in "${!old_uuid[@]}"; do
+                [[ "${old_uuid[$tag]}" == "$hi" && -n "${new_uuid[$tag]:-}" ]] && niu="${new_uuid[$tag]}"
+            done
+            rw_api PATCH /api/hosts "$(jq -nc --arg u "$hu" --arg p "$u" --arg i "$niu" --argjson ex "$ex" \
+                '{uuid:$u, excludeFromSubscriptionTypes:$ex, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}}')" >/dev/null
+        done < <(jq -r --arg p "$u" '.[] | select(.inbound.configProfileUuid == $p and ((.tags // []) | index("F2D_AUTO") | not)) | [.uuid, .remark, (.inbound.configProfileInboundUuid // "")] | @tsv' <<<"$hosts")
+        ok "«${n}»: $(core_label "$act")"
+        done_names+=("$n")
+    done <<<"$profiles"
+    config_set NODE_CORE "$act" >/dev/null 2>&1
+    audit_write NODE_CORE - - - "$act: ${done_names[*]:-ничего}"
+    ((${#done_names[@]})) && info "Клиентам нужно обновить подписку."
+    return 0
+}
+
+# ---------- редирект портов 80/443 → NODE_PORT для обхода блокировки хостером ----------
+# Переключить порт всех внешних нод в панели (локальную ноду 127.x/172.x не трогает)
+node_panel_ports_set() {   # port
+    local p="$1"
+    is_port "$p" || die "Неверный порт: $p"
+    rw_need_api || return 1
+    local nodes u name addr cur n=0
+    nodes=$(rw_api GET /api/nodes | jq -r '.response[]? | [.uuid, .name, .address, ((.port // 2222) | tostring)] | @tsv')
+    [[ -n "$nodes" ]] || { warn "В панели нет нод"; return 1; }
+    while IFS=$'\t' read -r u name addr cur; do
+        [[ -n "$u" ]] || continue
+        is_private_ip "$addr" && continue
+        if [[ "$cur" != "$p" ]]; then
+            rw_api PATCH /api/nodes "$(jq -nc --arg u "$u" --argjson p "$p" '{uuid:$u, port:$p}')" >/dev/null
+        fi
+        rw_api POST "/api/nodes/$u/actions/restart" >/dev/null 2>&1 || true
+        ok "Нода «${name}» ($addr): порт в панели → $p (перезапущена)"
+        n=$((n + 1))
+    done <<<"$nodes"
+    ((n)) || info "Внешних нод в панели не найдено"
+    audit_write NODE_PANEL_PORT - - - "внешние ноды ($n) → порт $p"
+    return 0
+}
+
+node_api_redirect() {   # [80|443|80,443|off|status] [--panel-port ПОРТ]
+    local arg="${1:-}" pport=""; shift || true
+    while (($#)); do
+        case "$1" in
+            --panel-port) pport="${2:?порт}"; shift;;
+            *) die "node api-redirect [80|443|80,443|off|status] [--panel-port 80|443|2222]";;
+        esac; shift
+    done
+    local api; api=$(detect_node_api_port 2>/dev/null || echo 2222)
+    if [[ "$arg" == status ]]; then
+        title "Редирект портов на API ноды ($api)"
+        if [[ -n "${NODE_API_REDIRECT:-}" && "$NODE_API_REDIRECT" != no && "$NODE_API_REDIRECT" != off ]]; then
+            ok "На этом сервере: включён с портов ${NODE_API_REDIRECT} → $api (только для IP панели: $(detect_panel_ips || echo "не задан"))"
+        else
+            info "На этом сервере: выключен (прямой порт $api)"
+        fi
+        return 0
+    fi
+    require_root
+    if [[ -z "$arg" ]]; then
+        title "Обход блокировки порта API ноды ($api) хостером панели"
+        echo "  Если хостер панели блокирует исходящие соединения на нестандартные порты ($api),"
+        echo "  нода может принимать подключения ТОЛЬКО с IP панели на портах 80 и/или 443 и"
+        echo "  прозрачно заворачивать их на порт API ноды ($api). Для всех остальных IP в мире"
+        echo "  порты 80 и 443 продолжают работать как обычно (Xray Reality / сайт-маскировка)."
+        echo
+        if has_node; then
+            echo "  Сейчас на этой ноде: ${C_BOLD}${NODE_API_REDIRECT:-выключен (только прямой порт $api)}${C_RESET}"
+            echo "   1. Включить редирект с портов 80 и 443 → $api (рекомендуется)"
+            echo "   2. Только с порта 80 → $api"
+            echo "   3. Только с порта 443 → $api"
+            echo "   4. Выключить редирект (прямой порт $api)"
+            ask "Вариант" "1"
+            case "$REPLY" in
+                1) arg="80 443";; 2) arg="80";; 3) arg="443";; 4) arg="off";; *) return 0;;
+            esac
+        fi
+        if has_panel || { [[ "$RW_API_URL" != http://127.0.0.1:3000 ]] && F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1; }; then
+            echo
+            echo "  ${C_BOLD}Порт внешних нод в панели Remnawave${C_RESET} (сначала включите редирект на самих нодах):"
+            echo "   1. Переключить все внешние ноды в панели на порт 80"
+            echo "   2. Переключить все внешние ноды в панели на порт 443"
+            echo "   3. Вернуть всем внешним нодам стандартный порт 2222"
+            echo "   0. Не менять порты в панели"
+            ask "Выбор" "0"
+            case "$REPLY" in
+                1) pport=80;; 2) pport=443;; 3) pport=2222;;
+            esac
+        fi
+    fi
+
+    if [[ -n "$arg" ]] && has_node; then
+        case "$arg" in
+            off|no|disable|0)
+                config_set NODE_API_REDIRECT ""
+                # снять ручные правила iptables PREROUTING REDIRECT, если их добавляли ранее
+                if have iptables; then
+                    local ip p
+                    for ip in $(detect_panel_ips); do
+                        for p in 53 80 443; do
+                            while iptables -t nat -D PREROUTING -s "$ip" -p tcp --dport "$p" -j REDIRECT --to-ports "$api" 2>/dev/null; do :; done
+                        done
+                    done
+                    have netfilter-persistent && netfilter-persistent save >/dev/null 2>&1 || true
+                fi
+                fw_apply >/dev/null && ok "Редирект выключен: API ноды принимает панель только на прямом порту $api"
+                audit_write NODE_API_REDIRECT - - - "off";;
+            *)
+                local ports=() p
+                for p in ${arg//,/ }; do
+                    is_port "$p" || die "Неверный порт: $p"
+                    ports+=("$p")
+                done
+                ((${#ports[@]})) || die "Укажите порты (например: 80,443) или off"
+                [[ -n "$(detect_panel_ips)" ]] || warn "IP панели не задан — укажите его: f2d node panel-ip <IP_панели>"
+                config_set NODE_API_REDIRECT "${ports[*]}"
+                fw_apply >/dev/null && ok "Редирект включён: порты ${ports[*]} → $api (только для IP панели: $(detect_panel_ips || echo "—"))"
+                audit_write NODE_API_REDIRECT - - - "${ports[*]} → $api";;
+        esac
+    fi
+
+    if [[ -n "$pport" ]]; then
+        node_panel_ports_set "$pport"
+    fi
+}

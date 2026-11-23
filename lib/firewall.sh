@@ -146,6 +146,10 @@ fw_render() {
     tcp=$(fw_public_tcp | _port_ranges)
     udp=$(fw_public_udp | _port_ranges)
     api=""; has_node && api=$(detect_node_api_port)
+    local rports=""
+    if has_node && [[ -n "${NODE_API_REDIRECT:-}" && "$NODE_API_REDIRECT" != no && "$NODE_API_REDIRECT" != off && -n "$api" ]]; then
+        rports=$(echo "$NODE_API_REDIRECT" | _port_ranges)
+    fi
     wan=$(wan_iface)
     local panels; panels=$(detect_panel_ips)
     # shellcheck disable=SC2086  # списки через пробел — разбиваем намеренно
@@ -180,6 +184,17 @@ table inet $F2D_NFT_TABLE {
     set xray_udp { type inet_service; flags interval;$(_elements "$xudp") }
     set flood4   { type ipv4_addr; flags dynamic, timeout; timeout 1m; }
     set flood6   { type ipv6_addr; flags dynamic, timeout; timeout 1m; }
+$( if [[ -n "$rports" ]]; then cat <<RULES
+
+    # Обход блокировки хостером исходящих нестандартных портов (2222) на сервере панели:
+    # пакеты ТОЛЬКО с IP панели на выбранные порты (80/443) заворачиваются на API ноды.
+    chain prerouting {
+        type nat hook prerouting priority dstnat - 10; policy accept;
+        ip  saddr @panel4 tcp dport { $rports } redirect to :$api
+        ip6 saddr @panel6 tcp dport { $rports } redirect to :$api
+    }
+RULES
+fi )
 
     chain input {
         type filter hook input priority filter - 10; policy accept;
@@ -382,7 +397,9 @@ fw_status() {
     printf '  %-26s %s\n' "Режим:" "$(fw_mode)"
     printf '  %-26s %s\n' "Открытые TCP:" "$(fw_public_tcp)"
     printf '  %-26s %s\n' "Открытые UDP:" "$(fw_public_udp)"
-    has_node && printf '  %-26s %s (только с: %s)\n' "API ноды:" "$(detect_node_api_port)" "$(detect_panel_ips || true)"
+    local redir=""
+    [[ -n "${NODE_API_REDIRECT:-}" && "$NODE_API_REDIRECT" != no && "$NODE_API_REDIRECT" != off ]] && redir="; редирект с портов: $NODE_API_REDIRECT"
+    has_node && printf '  %-26s %s (только с: %s%s)\n' "API ноды:" "$(detect_node_api_port)" "$(detect_panel_ips || true)" "$redir"
     printf '  %-26s %s\n' "Белый список:" "${TRUSTED_IPS:-—}"
     printf '  %-26s %s\n' "Забанено сейчас:" "$(( ${b4:-0} + ${b6:-0} ))"
     printf '  %-26s %s сетей (%s)\n' "В блок-листах:" "$(( ${bl4:-0} + ${bl6:-0} ))" "${BLOCKLISTS:-—}"

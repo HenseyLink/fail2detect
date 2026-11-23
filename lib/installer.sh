@@ -301,6 +301,22 @@ EOF
 # T_DOMAIN, T_TARGET (чужой сайт для Reality), T_OBFS (Salamander).
 # Запасные транспорты нужны на случай, если основной глушат (например, UDP
 # для Hysteria 2): клиент переключится на другой хост в подписке.
+# Выбор клиентского ядра: both (Xray + Mihomo) | xray | mihomo
+ask_client_core() {
+    [[ -n "${NODE_CORE_SET:-}" ]] && return 0
+    echo
+    echo "  ${C_BOLD}Ядро клиентских приложений${C_RESET}"
+    echo "   1. Xray + Mihomo — оба ядра сразу (рекомендуется)"
+    echo "   2. только Xray   — Happ/Xray, v2rayNG, Streisand, v2rayN"
+    echo "   3. только Mihomo — Clash Meta, FlClash, Koala Clash, Happ/Mihomo"
+    local def=1
+    case "${NODE_CORE:-both}" in xray) def=2;; mihomo) def=3;; esac
+    ask "Вариант" "$def"
+    case "$REPLY" in 2|xray) NODE_CORE=xray;; 3|mihomo) NODE_CORE=mihomo;; *) NODE_CORE=both;; esac
+    NODE_CORE_SET=1
+    config_set NODE_CORE "$NODE_CORE" >/dev/null 2>&1
+}
+
 NODE_TRANSPORT_SET=(tcp-reality hysteria2 grpc-reality xhttp-reality)
 
 ask_transports() {   # [домен по умолчанию]
@@ -435,6 +451,7 @@ install_node() {
             --transports) targ="$2"; shift;; --transport) one_t="$2"; shift;; --port) one_p="$2"; shift;;
             --domain) T_DOMAIN="$2"; shift;; --target) T_TARGET="$2"; shift;;
             --obfs) T_OBFS="$2"; shift;; --node-port) napi="$2"; shift;;
+            --core) core_valid "${2:-}" || die "--core both|xray|mihomo"; NODE_CORE="$2"; NODE_CORE_SET=1; shift;;
             --ru) NODE_RU_POLICY="$2"; NODE_RU_POLICY_SET=1; shift;; --ru-ripe) NODE_RU_RIPE=yes;;
             *) die "Неизвестный параметр: $1";;
         esac; shift
@@ -477,6 +494,7 @@ install_node() {
         ask "Код страны (2 буквы)" "${cc:-XX}"; cc="${REPLY^^}"
         ask "Адрес ноды для панели (IP или домен)" "$me"; local addr="$REPLY"
         ask_transports
+        ask_client_core
         ask_ru_policy "$cc"
         ph=$(sed -E 's#^https?://([^/:]+).*#\1#' <<<"$RW_API_URL")
         panel_ip=$(getent ahostsv4 "$ph" 2>/dev/null | awk 'NR==1{print $1}')
@@ -543,14 +561,16 @@ node_add() {   # [address]
     ask "Адрес ноды (IP или домен, к нему подключается панель)" "${1:-}"; local addr="$REPLY"
     ask "Код страны (2 буквы)" "XX"; local cc="${REPLY^^}"
     ASK_PORT_NOCHECK=1 ask_transports
+    ask_client_core
     ask_ru_policy "$cc"
     node_add_api "$name" "$addr" "$cc" "${T_DOMAIN:-$addr}" || return 1
     title "Дальше — на сервере ноды"
-    echo "  bash <(curl -fsSL https://raw.githubusercontent.com/${F2D_REPO}/main/install.sh)"
+    echo "  bash <(curl -fsSL ${F2D_RAW_URL}/install.sh)"
     printf '  fail2detect install node --panel-ip %s --secret %q --transports %s' "$(public_ip)" "$NODE_SECRET" "$(transports_arg)"
     [[ -n "$T_DOMAIN" ]] && printf ' --domain %s' "$T_DOMAIN"
     [[ -n "$T_TARGET" ]] && printf ' --target %s' "$T_TARGET"
     [[ -n "$T_OBFS" ]] && printf ' --obfs %s' "$T_OBFS"
+    [[ "${NODE_CORE:-both}" != both ]] && printf ' --core %s' "$NODE_CORE"
     echo
     balancer_offer "$name"
 }
@@ -559,6 +579,7 @@ node_add() {   # [address]
 node_add_local() {
     info "Нода на этом же сервере"
     ask_transports
+    ask_client_core
     ask_ru_policy
     local gw; gw=$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
     [[ -n "$gw" ]] || gw="172.17.0.1"

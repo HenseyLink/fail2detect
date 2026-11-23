@@ -33,7 +33,7 @@ for t in "${TRANSPORTS[@]}"; do
     inb=$(inbound_build "$t" "IN_$t" 8443 node.example.com "" "" "" "" "$obfs")
     # клиенты — так их добавляет Remnawave (addUsersToInbound)
     inb=$(jq --arg id "$uuid" 'if .protocol == "hysteria" then .settings.clients = [{id:$id, auth:$id, email:"1"}]
-        else .settings.clients = [{id:$id, email:"1"} + (if .streamSettings.network == "raw" then {flow:"xtls-rprx-vision"} else {} end)] end' <<<"$inb")
+        else .settings.clients = [{id:$id, email:"1"} + (if (.streamSettings.network == "raw" or .streamSettings.network == "tcp") then {flow:"xtls-rprx-vision"} else {} end)] end' <<<"$inb")
     profile_config "$inb" > "$WORK/$t.json"
     # от имени владельца файлов: образ Xray не root, а ключ — 600 (remnanode же работает от root)
     if res=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/$t.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" -v /dev/shm:/dev/shm \
@@ -48,7 +48,7 @@ source "$ROOT/lib/installer.sh"
 parse_transports_arg "tcp-reality:443,hysteria2:443,grpc-reality:8443,xhttp-reality:4443,xhttp-tls:2083,grpc-tls:2087"
 T_DOMAIN=node.example.com; T_TARGET=""; T_OBFS="testpassword"
 inbs=$(build_inbounds SET | jq --arg id "$uuid" 'map(if .protocol == "hysteria" then .settings.clients = [{id:$id, auth:$id, email:"1"}]
-    else .settings.clients = [{id:$id, email:"1"} + (if .streamSettings.network == "raw" then {flow:"xtls-rprx-vision"} else {} end)] end)')
+    else .settings.clients = [{id:$id, email:"1"} + (if (.streamSettings.network == "raw" or .streamSettings.network == "tcp") then {flow:"xtls-rprx-vision"} else {} end)] end)')
 profile_config "$inbs" > "$WORK/set.json"
 if res=$(docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/set.json:/c.json:ro" -v "$WORK/xray-certs:$XRAY_CERT_DIR:ro" "$XRAY_IMAGE" run -test -c /c.json 2>&1); then
     pass "xray: 6 транспортов в одном профиле"

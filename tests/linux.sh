@@ -77,6 +77,27 @@ inb=$(inbound_build tcp-reality T 443 "" "www.microsoft.com:443")
 inb=$(inbound_build xhttp-reality T 443 d.example.com "" "/keep" "PRIV" "SID")
 [[ "$(jq -r '.streamSettings | .xhttpSettings.path + " " + .realitySettings.privateKey + " " + .realitySettings.shortIds[0]' <<<"$inb")" == "/keep PRIV SID" ]] \
     && pass "смена транспорта сохраняет ключи и path" || fail "сохранение ключей и path"
+# выбор ядра клиентов: both (Xray + Mihomo) | xray | mihomo
+inb_both=$(NODE_CORE=both inbound_build tcp-reality T 443 d.example.com)
+inb_xray=$(NODE_CORE=xray inbound_build tcp-reality T 443 d.example.com)
+[[ "$(jq -r '.streamSettings.network + " " + (.streamSettings.realitySettings.minClientVer // "-")' <<<"$inb_both")" == "tcp 0.0.0" ]] \
+    && pass "ядро both (Xray + Mihomo): tcp-reality строит network=tcp и minClientVer=0.0.0" || fail "inbound both" "$inb_both"
+[[ "$(jq -r '.streamSettings.network + " " + (.streamSettings.realitySettings.minClientVer // "-")' <<<"$inb_xray")" == "raw -" ]] \
+    && pass "ядро xray: tcp-reality строит network=raw" || fail "inbound xray" "$inb_xray"
+[[ "$(host_fields "$inb_both" d.example.com both | jq -c .excludeFromSubscriptionTypes)" == "null" \
+   && "$(host_fields "$inb_xray" d.example.com xray | jq -c .excludeFromSubscriptionTypes)" == '["MIHOMO","CLASH","STASH"]' \
+   && "$(host_fields "$inb_both" d.example.com mihomo | jq -c .excludeFromSubscriptionTypes)" == '["XRAY_JSON","XRAY_BASE64"]' ]] \
+    && pass "хосты: фильтр типов подписок по выбранному ядру (both / xray / mihomo)" || fail "excludeFromSubscriptionTypes"
+[[ "$(node_core_of "{\"inbounds\":[$inb_xray]}")|$(node_core_of "{\"inbounds\":[$inb_both]}")|$(node_core_of "{\"inbounds\":[$inb_both]}" '["XRAY_JSON","XRAY_BASE64"]')" == "xray|both|mihomo" ]] \
+    && pass "node_core_of определяет режим профиля (xray / both / mihomo)" || fail "node_core_of"
+c_conv=$(node_core_apply_config "{\"inbounds\":[$inb_xray]}" both)
+[[ "$(jq -r '.inbounds[0].streamSettings.network + " " + .inbounds[0].streamSettings.realitySettings.minClientVer' <<<"$c_conv")" == "tcp 0.0.0" ]] \
+    && pass "node_core_apply_config переводит профиль raw → tcp + minClientVer=0.0.0" || fail "node_core_apply_config" "$c_conv"
+# редирект 80/443 → NODE_PORT только по выбору пользователя
+r_def=$(NODE_API_REDIRECT="" fw_render)
+! grep -q 'chain prerouting' <<<"$r_def" && pass "по умолчанию редирект портов на NODE_PORT выключен" || fail "редирект по умолчанию"
+r_red=$(NODE_API_REDIRECT="80 443" fw_render)
+grep -q 'ip  saddr @panel4 tcp dport { 80,443 } redirect to :2222' <<<"$r_red" && pass "NODE_API_REDIRECT='80 443': редирект с 80 и 443 → 2222 только для @panel4" || fail "NODE_API_REDIRECT" "$r_red"
 
 section "Несколько транспортов на одной ноде"
 parse_transports_arg "tcp-reality:443,hysteria2:443,grpc-reality:8443,xhttp-reality:4443"
@@ -925,6 +946,41 @@ patched() { grep -c '^PATCH' "$RU_API_LOG"; }
 [[ "$(patched)" == 0 && "$out" == *"Нет профиля"* ]] && pass "несуществующий профиль — ошибка, ничего не меняется" || fail "чужое имя" "$out"
 unset -f rw_api rw_need_api require_root _ru_api patched
 source "$ROOT/lib/remnawave.sh"
+
+section "Ядро клиентов (Xray / Mihomo / оба) и редирект API ноды"
+CORE_LOG="$WORK/core-api.log"
+_core_api() {
+    echo "$1 $2 ${3:-}" >> "$CORE_LOG"
+    case "$1 $2" in
+        "GET /api/config-profiles") echo '{"response":{"configProfiles":[{"uuid":"p1","name":"f2d-de1"}]}}';;
+        "GET /api/config-profiles/p1") echo '{"response":{"uuid":"p1","inbounds":[{"tag":"DE_REALITY","uuid":"i-old"}],"config":{"inbounds":[{"tag":"DE_REALITY","port":443,"protocol":"vless","streamSettings":{"network":"raw","security":"reality","realitySettings":{"serverNames":["d.example"]}}}]}}}';;
+        "PATCH /api/config-profiles") echo '{"response":{"uuid":"p1","inbounds":[{"tag":"DE_REALITY","uuid":"i-new"}]}}';;
+        "GET /api/hosts") echo '{"response":[{"uuid":"h1","remark":"de1 · Reality","tags":[],"inbound":{"configProfileUuid":"p1","configProfileInboundUuid":"i-old"}},{"uuid":"ha","remark":"⚡ Авто","tags":["F2D_AUTO"],"inbound":{"configProfileUuid":"p1","configProfileInboundUuid":"i-old"}}]}';;
+        "GET /api/nodes") echo '{"response":[{"uuid":"n-local","name":"Rabisu","address":"172.30.0.1","port":2222,"configProfile":{"activeInbounds":["i-old"]}},{"uuid":"n-ext","name":"QuickSRV","address":"85.31.148.100","port":2222,"configProfile":{"activeInbounds":["i-old"]}}]}';;
+        "GET /api/internal-squads") echo '{"response":{"internalSquads":[{"uuid":"s1","inbounds":["i-old"]}]}}';;
+        *) echo '{"response":{"uuid":"ok"}}';;
+    esac
+}
+rw_api() { _core_api "$@"; }; rw_need_api() { :; }; require_root() { :; }
+: > "$CORE_LOG"; node_core both --all >/dev/null 2>&1
+grep -q 'PATCH /api/config-profiles .*"network":"tcp".*"minClientVer":"0.0.0"' "$CORE_LOG" \
+    && pass "node core both: профиль переведён с raw на tcp + minClientVer 0.0.0" || fail "node core both: профиль" "$(cat "$CORE_LOG")"
+grep -q 'PATCH /api/hosts {"uuid":"h1","excludeFromSubscriptionTypes":\[\],"inbound":{"configProfileUuid":"p1","configProfileInboundUuid":"i-new"}}' "$CORE_LOG" \
+    && ! grep -q '"ha"' "$CORE_LOG" && pass "node core both: хост перепривязан к новому uuid inbound'а, запись «Авто» не тронута" || fail "node core both: хосты" "$(cat "$CORE_LOG")"
+: > "$CORE_LOG"; node_core xray --profile 1 >/dev/null 2>&1
+grep -q 'PATCH /api/hosts .*"excludeFromSubscriptionTypes":\["MIHOMO","CLASH","STASH"\]' "$CORE_LOG" \
+    && pass "node core xray: хост скрыт из Mihomo/Clash" || fail "node core xray" "$(cat "$CORE_LOG")"
+: > "$CORE_LOG"; node_core mihomo --profile f2d-de1 >/dev/null 2>&1
+grep -q 'PATCH /api/hosts .*"excludeFromSubscriptionTypes":\["XRAY_JSON","XRAY_BASE64"\]' "$CORE_LOG" \
+    && pass "node core mihomo: хост скрыт из Xray" || fail "node core mihomo" "$(cat "$CORE_LOG")"
+: > "$CORE_LOG"; fw_apply() { :; }
+node_api_redirect 80,443 --panel-port 80 >/dev/null 2>&1
+[[ "$NODE_API_REDIRECT" == "80 443" ]] && grep -q 'PATCH /api/nodes {"uuid":"n-ext","port":80}' "$CORE_LOG" && ! grep -q '"n-local"' "$CORE_LOG" \
+    && pass "node api-redirect: редирект 80 443 включён, внешняя нода переведена на 80, локальная 172.30.0.1 не тронута" || fail "node api-redirect" "$NODE_API_REDIRECT | $(cat "$CORE_LOG")"
+node_api_redirect off >/dev/null 2>&1
+[[ -z "$NODE_API_REDIRECT" ]] && pass "node api-redirect off: редирект выключен" || fail "node api-redirect off" "$NODE_API_REDIRECT"
+unset -f rw_api rw_need_api require_root fw_apply _core_api
+source "$ROOT/lib/firewall.sh"; source "$ROOT/lib/remnawave.sh"
 
 section "Порт API ноды"
 NP="$WORK/nodeport"; mkdir -p "$NP/panel" "$NP/node"

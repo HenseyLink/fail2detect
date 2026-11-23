@@ -50,6 +50,25 @@ transport_l4()      { [[ "$1" == hysteria2 ]] && echo udp || echo tcp; }
 transport_reality() { [[ "$1" == *-reality ]]; }
 transport_tls()     { [[ "$1" == *-tls || "$1" == hysteria2 ]]; }
 
+# ядро клиентов: both (Xray + Mihomo) | xray | mihomo
+core_valid() { [[ "$1" == both || "$1" == xray || "$1" == mihomo ]]; }
+core_label() {
+    case "${1:-both}" in
+        both)   echo "Xray + Mihomo (оба ядра)";;
+        xray)   echo "только Xray";;
+        mihomo) echo "только Mihomo (Clash Meta)";;
+        *)      echo "$1";;
+    esac
+}
+# какие типы подписок исключить у хоста при выбранном ядре
+core_exclude_sub_types() {   # core
+    case "${1:-both}" in
+        xray)   echo '["MIHOMO","CLASH","STASH"]';;
+        mihomo) echo '["XRAY_JSON","XRAY_BASE64"]';;
+        *)      echo '[]';;
+    esac
+}
+
 # определить транспорт по JSON inbound'а
 transport_of_inbound() {
     jq -r '
@@ -100,14 +119,17 @@ inbound_build() {
     # для чужого target serverNames = его домен
     if transport_reality "$t" && [[ "$target" != "$NGINX_SOCK" && -z "$sni" ]]; then sni="${target%%:*}"; fi
 
+    local core="${NODE_CORE:-both}"
     jq -n --arg t "$t" --arg tag "$tag" --argjson port "$port" --arg sni "$sni" --arg target "$target" \
-          --arg path "${path#/}" --arg priv "$priv" --arg sid "$sid" --arg obfs "$obfs" --arg certdir "$XRAY_CERT_DIR" --arg sock "$NGINX_SOCK" '
+          --arg path "${path#/}" --arg priv "$priv" --arg sid "$sid" --arg obfs "$obfs" \
+          --arg certdir "$XRAY_CERT_DIR" --arg sock "$NGINX_SOCK" --arg core "$core" '
         def reality: {
             security: "reality",
             realitySettings: ({
                 show: false, target: $target, serverNames: [$sni],
                 privateKey: $priv, shortIds: [$sid]
-            } + (if $target == $sock then {xver: 1} else {} end))
+            } + (if $target == $sock then {xver: 1} else {} end)
+              + (if $core != "xray" then {minClientVer: "0.0.0"} else {} end))
         };
         def tls($alpn): {
             security: "tls",
@@ -122,7 +144,8 @@ inbound_build() {
             sniffing: { enabled: true, destOverride: ["http", "tls", "quic"] },
             streamSettings: $stream
         };
-        if   $t == "tcp-reality"   then vless({network: "raw"} + reality)
+        # Xray понимает и "tcp", и "raw", а Mihomo отвергает "raw" и требует "tcp"
+        if   $t == "tcp-reality"   then vless({network: (if $core == "xray" then "raw" else "tcp" end)} + reality)
         elif $t == "xhttp-reality" then vless({network: "xhttp", xhttpSettings: {path: ("/" + $path), mode: "auto"}} + reality)
         elif $t == "xhttp-tls"     then vless({network: "xhttp", xhttpSettings: {path: ("/" + $path), mode: "auto", host: $sni}} + tls(["h2", "http/1.1"]))
         elif $t == "grpc-reality"  then vless({network: "grpc", grpcSettings: {serviceName: $path}} + reality)
@@ -141,9 +164,10 @@ inbound_build() {
 }
 
 # поля хоста Remnawave (что попадёт в подписку клиентам) для транспорта
-host_fields() {   # inbound_json address
-    local inb="$1" addr="$2"
-    jq -n --argjson i "$inb" --arg addr "$addr" '
+host_fields() {   # inbound_json address [core]
+    local inb="$1" addr="$2" core="${3:-${NODE_CORE:-both}}" ex
+    ex=$(core_exclude_sub_types "$core")
+    jq -n --argjson i "$inb" --arg addr "$addr" --argjson ex "$ex" '
         ($i.streamSettings // {}) as $s
         | (if $s.security == "reality" then ($s.realitySettings.serverNames[0] // "")
            elif $s.security == "tls" then ($s.tlsSettings.serverName // "") else "" end) as $sni
@@ -158,7 +182,8 @@ host_fields() {   # inbound_json address
                    elif $s.network == "grpc" and $s.security == "tls" then "h2" else null end),
             fingerprint: (if $i.protocol == "hysteria" then null else "chrome" end),
             securityLayer: "DEFAULT",
-            finalMask: ($s.finalmask // null)
+            finalMask: ($s.finalmask // null),
+            excludeFromSubscriptionTypes: (if ($ex | length) > 0 then $ex else null end)
         }'
 }
 

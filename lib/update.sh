@@ -23,9 +23,10 @@ version_gt() {
     return 1
 }
 
-# последняя версия в репозитории (из lib/common.sh ветки main)
+# последняя версия в репозитории (сначала GitLab, запасной — GitHub)
 f2d_remote_version() {
-    curl -fsS --connect-timeout 3 --max-time 6 "https://raw.githubusercontent.com/${F2D_REPO}/main/lib/common.sh" 2>/dev/null \
+    { curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_URL}/lib/common.sh" 2>/dev/null \
+      || curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_FALLBACK}/lib/common.sh" 2>/dev/null; } \
         | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1
 }
 
@@ -130,7 +131,7 @@ rw_versions() {
     # ноды на других серверах — их версии видит панель
     if has_panel && F2D_NO_PROMPT=1 rw_token >/dev/null 2>&1; then
         local nodes; nodes=$(F2D_API_MAX_TIME=10 rw_api GET /api/nodes 2>/dev/null | jq -r '.response[]? |
-            [.name, (.nodeVersion // "?"), (.xrayVersion // "?"), (if .isConnected then "подключена" else "нет связи" end)] | @tsv' 2>/dev/null)
+            [.name, (.nodeVersion // .versions.node // "?"), (.xrayVersion // .versions.xray // "?"), (if .isConnected then "подключена" else "нет связи" end)] | @tsv' 2>/dev/null)
         if [[ -n "$nodes" ]]; then
             echo; echo "  ${C_BOLD}Ноды в панели${C_RESET} (обновляются на своих серверах: f2d rw update node)"
             local name nv xv st

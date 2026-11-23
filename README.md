@@ -14,6 +14,8 @@
 ## Установка
 
 ```bash
+bash <(curl -fsSL https://gitlab.com/melodiceo/fail2detect/-/raw/main/install.sh)
+# или с GitHub:
 bash <(curl -fsSL https://raw.githubusercontent.com/HenseyLink/fail2detect/main/install.sh)
 ```
 
@@ -136,7 +138,10 @@ fail2detect remove panel      # удалить панель
 fail2detect node transport          # сменить транспорт и/или порт (например tcp-reality:443 → xhttp-reality:8443 или → hysteria2)
 fail2detect node add-transport      # добавить к ноде запасные транспорты (старый не трогается)
 fail2detect node port 8443          # только перенести порт
+fail2detect node core               # ядро клиентов для профилей: both (Xray + Mihomo) | xray | mihomo
+fail2detect node core both --all    # перевести все профили в режим совместимости с Xray и Mihomo сразу
 fail2detect node api-port 32222     # сменить NODE_PORT (2222) в compose, UFW и панели
+fail2detect node api-redirect 80,443 # на ноде: завернуть порты 80/443 → 2222 только для IP панели (если хостер панели режет 2222)
 fail2detect node inbounds           # посмотреть inbound'ы, порты и транспорты
 ```
 
