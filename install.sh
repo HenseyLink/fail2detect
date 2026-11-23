@@ -23,14 +23,22 @@ elif command -v dnf >/dev/null; then
     dnf install -y -q nftables curl jq iproute gawk coreutils util-linux tar >/dev/null
 fi
 
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+SRC_DIR=""
+if [[ "$MODE" != --update && -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 if [[ -n "$SRC_DIR" && -f "$SRC_DIR/fail2detect" && -d "$SRC_DIR/lib" ]]; then
     cp -a "$SRC_DIR/." "$tmp/src"   # установка из локальной копии репозитория
 else
-    curl -fsSL --connect-timeout 5 --max-time 30 "https://gitlab.com/${GITLAB_REPO}/-/archive/${BRANCH}/fail2detect-${BRANCH}.tar.gz" -o "$tmp/f2d.tgz" 2>/dev/null \
-        || curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" -o "$tmp/f2d.tgz"
-    mkdir -p "$tmp/src"; tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1
+    mkdir -p "$tmp/src"
+    if ! { curl -fsS --connect-timeout 5 --max-time 30 "https://gitlab.com/${GITLAB_REPO}/-/archive/${BRANCH}/fail2detect-${BRANCH}.tar.gz" -o "$tmp/f2d.tgz" 2>/dev/null \
+           && tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1 2>/dev/null \
+           && [[ -f "$tmp/src/fail2detect" ]]; }; then
+        rm -rf "$tmp/src"; mkdir -p "$tmp/src"
+        curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" -o "$tmp/f2d.tgz"
+        tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1
+    fi
 fi
 for f in "$tmp/src/fail2detect" "$tmp/src"/lib/*.sh; do bash -n "$f" || { red "Повреждён файл: $f"; exit 1; }; done
 

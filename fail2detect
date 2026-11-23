@@ -174,8 +174,9 @@ cmd_update() {
     require_root
     info "Обновляю fail2detect…"
     local script
-    script=$(curl -fsSL --connect-timeout 5 --max-time 15 "${F2D_RAW_URL}/install.sh" 2>/dev/null \
-        || curl -fsSL --connect-timeout 5 --max-time 15 "${F2D_RAW_FALLBACK}/install.sh") || return 1
+    script=$(curl -fsS --connect-timeout 5 --max-time 15 "${F2D_RAW_URL}/install.sh" 2>/dev/null || true)
+    [[ "$script" == "#!/usr/bin/env bash"* ]] || script=$(curl -fsSL --connect-timeout 5 --max-time 15 "${F2D_RAW_FALLBACK}/install.sh") || return 1
+    [[ "$script" == "#!/usr/bin/env bash"* ]] || { err "Не удалось скачать установщик"; return 1; }
     bash -s -- --update <<<"$script"
 }
 

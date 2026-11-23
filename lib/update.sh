@@ -25,9 +25,12 @@ version_gt() {
 
 # последняя версия в репозитории (сначала GitLab, запасной — GitHub)
 f2d_remote_version() {
-    { curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_URL}/lib/common.sh" 2>/dev/null \
-      || curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_FALLBACK}/lib/common.sh" 2>/dev/null; } \
-        | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1
+    local v
+    v=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_URL}/lib/common.sh" 2>/dev/null \
+        | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1)
+    [[ -n "$v" ]] || v=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_FALLBACK}/lib/common.sh" 2>/dev/null \
+        | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1)
+    echo "$v"
 }
 
 # версия, до которой можно обновиться (пусто — обновлений нет). С кэшем.
@@ -51,6 +54,11 @@ f2d_self_update() {
     confirm "Обновить fail2detect $F2D_VERSION → $v?" y || return 0
     cmd_update || { err "Обновление не удалось"; return 1; }
     rm -f "$F2D_UPDATE_CACHE"
+    local new_v; new_v=$("$F2D_BIN" version 2>/dev/null | awk '{print $2}')
+    if [[ -n "$new_v" && "$new_v" == "$F2D_VERSION" ]]; then
+        err "Версия после обновления не изменилась ($F2D_VERSION)"
+        return 1
+    fi
     if [[ "${1:-}" == --menu ]]; then
         info "Перезапускаю меню новой версией…"; sleep 1
         exec "$F2D_BIN"
