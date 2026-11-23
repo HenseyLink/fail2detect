@@ -58,14 +58,23 @@ _is_private_ip() { [[ "$1" =~ ^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168
 # Шаг за шагом: адрес, порт, фаервол, связь из контейнера панели, переподключение.
 panel_fix_local_node() {
     if ! has_node; then info "Ноды на этом сервере нет — чинить нечего"; return 0; fi
-    local gw net nodes u name addr port dis
+    # если на сервере есть прокси установщика (remnawave-nginx / caddy-remnawave) и поверх
+    # него случайно поднялся f2d-nginx — он перехватил /dev/shm/nginx.sock у панели
+    local ext_px; ext_px=$(declare -F external_web_proxy >/dev/null && external_web_proxy || true)
+    if [[ -n "$ext_px" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${F2D_WEB_CONTAINER:-f2d-nginx}"; then
+        warn "Контейнер ${F2D_WEB_CONTAINER:-f2d-nginx} конфликтовал с $ext_px за сокет $NGINX_SOCK — останавливаю лишний nginx"
+        docker rm -f "${F2D_WEB_CONTAINER:-f2d-nginx}" >/dev/null 2>&1 || true
+        [[ -d "${F2D_WEB_DIR:-/opt/fail2detect-web}" ]] && _safe_rmdir "${F2D_WEB_DIR:-/opt/fail2detect-web}" 2>/dev/null || true
+        docker restart "$ext_px" >/dev/null 2>&1 && ok "Прокси панели ($ext_px) перезапущен и вернул себе сокет"
+    fi
+    local gw net nodes u name addr port dis puuid acount
     gw=$(panel_docker_gateway)
     net=$(docker network inspect "$(docker inspect remnawave -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null | head -1)" \
         -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
-    nodes=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r '.response[]? | [.uuid, .name, .address, ((.port // 0) | tostring), (.isDisabled | tostring)] | @tsv' 2>/dev/null)
+    nodes=$(F2D_NO_PROMPT=1 rw_api GET /api/nodes 2>/dev/null | jq -r '.response[]? | [.uuid, .name, .address, ((.port // 0) | tostring), (.isDisabled | tostring), (.configProfile.activeConfigProfileUuid // "-"), ((.configProfile.activeInbounds // [] | length) | tostring)] | @tsv' 2>/dev/null)
     if [[ -z "$nodes" ]]; then err "Не получил список нод из API панели (токен: fail2detect setup или config RW_API_TOKEN)"; return 1; fi
     local found=0
-    while IFS=$'\t' read -r u name addr port dis; do
+    while IFS=$'\t' read -r u name addr port dis puuid acount; do
         [[ -n "$u" ]] && _is_private_ip "$addr" || continue
         found=1
         [[ "$port" == 0 ]] && port="${NODE_API_PORT:-$(detect_node_api_port 2>/dev/null || echo 2222)}"
@@ -73,6 +82,14 @@ panel_fix_local_node() {
         # 1) выключена в панели
         if [[ "$dis" == true ]]; then
             rw_api POST "/api/nodes/$u/actions/enable" >/dev/null 2>&1 && ok "Была выключена в панели — включил" || warn "Нода выключена в панели, включить не вышло"
+        fi
+        # 1b) после правки профиля у ноды могли сброситься activeInbounds — тогда Xray не поднимает 443
+        if [[ -n "$puuid" && "$puuid" != "-" && "${acount:-0}" == 0 ]]; then
+            local all_inbs; all_inbs=$(rw_api GET "/api/config-profiles/$puuid" 2>/dev/null | jq -c '[.response.inbounds[]?.uuid]')
+            if [[ -n "$all_inbs" && "$all_inbs" != "[]" ]]; then
+                rw_api PATCH /api/nodes "$(jq -nc --arg u "$u" --arg p "$puuid" --argjson i "$all_inbs" '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:$i}}')" >/dev/null 2>&1 \
+                    && ok "У ноды были сброшены inbound'ы профиля — включил обратно ($(jq length <<<"$all_inbs") шт.)"
+            fi
         fi
         # 2) адрес = шлюз docker-сети панели
         if [[ -n "$gw" && "$addr" != "$gw" ]]; then

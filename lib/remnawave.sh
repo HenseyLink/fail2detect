@@ -350,24 +350,40 @@ node_transport_change() {   # [tag]
         confirm "Нода подготовлена?" n || { info "Отменено, панель не изменена"; return 1; }
     fi
 
-    # 2) профиль
-    local cfg r; cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --arg t "$tag" --argjson n "$new" '
-        .response.config | .inbounds |= map(if .tag == $t then $n else . end)')
+    # 2) профиль (снимаем привязки нод, хостов и squad'ов ДО PATCH: при пересоздании
+    #    inbound'а панель удаляет старый uuid каскадно)
+    local prof_before nodes_before hosts_before squads_before cfg r
+    prof_before=$(rw_api GET "/api/config-profiles/$puuid")
+    nodes_before=$(rw_api GET /api/nodes)
+    hosts_before=$(rw_api GET /api/hosts)
+    squads_before=$(rw_api GET /api/internal-squads)
+    cfg=$(jq --arg t "$tag" --argjson n "$new" '
+        .response.config | .inbounds |= map(if .tag == $t then $n else . end)' <<<"$prof_before")
     r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null || echo "$r")"
     ok "Профиль обновлён"
 
-    # 3) если uuid inbound'а сменился — перепривязать ноды, хосты и squad'ы
-    local niuuid; niuuid=$(jq -r --arg t "$tag" '.response.inbounds[] | select(.tag == $t) | .uuid' <<<"$r")
-    [[ -z "$niuuid" ]] && niuuid=$(rw_api GET "/api/config-profiles/$puuid" | jq -r --arg t "$tag" '.response.inbounds[] | select(.tag == $t) | .uuid')
+    # 3) если uuid inbound'ов сменились — перепривязать ноды, хосты и squad'ы по снимкам до PATCH
+    local inbs_after; inbs_after=$(jq -c '.response.inbounds // empty' <<<"$r")
+    [[ -z "$inbs_after" || "$inbs_after" == "[]" ]] && inbs_after=$(rw_api GET "/api/config-profiles/$puuid" | jq -c '.response.inbounds // []')
+    local umap; umap=$(jq -nc --argjson old "$(jq -c '.response.inbounds // []' <<<"$prof_before")" --argjson new "${inbs_after:-[]}" '
+        ($new | map({(.tag): .uuid}) | add // {}) as $n
+        | [$old[] | select($n[.tag] != null) | {(.uuid): $n[.tag]}] | add // {}')
+    local niuuid; niuuid=$(jq -r --arg t "$tag" '.[] | select(.tag == $t) | .uuid' <<<"${inbs_after:-[]}")
     if [[ -n "$niuuid" && "$niuuid" != "$iuuid" ]]; then
         info "Панель пересоздала inbound — перепривязываю"
         local nu ai
         while IFS=$'\t' read -r nu ai; do
-            rw_api PATCH /api/nodes "$(jq -n --arg u "$nu" --arg p "$puuid" --argjson a "$ai" --arg o "$iuuid" --arg n "$niuuid" \
-                '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:($a | map(if . == $o then $n else . end))}}')" >/dev/null && ok "Нода $nu перепривязана"
-        done < <(rw_api GET /api/nodes | jq -r --arg o "$iuuid" '.response[] | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv')
-        squad_add_inbound "$niuuid" "$iuuid"
+            rw_api PATCH /api/nodes "$(jq -n --arg u "$nu" --arg p "$puuid" --argjson a "$ai" --argjson m "$umap" \
+                '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:($a | map($m[.] // .) | unique)}}')" >/dev/null && ok "Нода $nu перепривязана"
+        done < <(jq -r --arg o "$iuuid" --arg p "$puuid" '.response[]? | select((.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) or .configProfile.activeConfigProfileUuid == $p) | [.uuid, ((.configProfile.activeInbounds // []) | map(.uuid // .) | if length == 0 then [$o] else . end | tojson)] | @tsv' <<<"$nodes_before")
+        local su scur
+        while read -r su; do
+            [[ -n "$su" ]] || continue
+            scur=$(jq -c --arg u "$su" '.response.internalSquads[]? | select(.uuid == $u) | [.inbounds[]? | (.uuid // .)]' <<<"$squads_before")
+            jq -e --arg o "$iuuid" 'index($o)' <<<"$scur" >/dev/null || continue
+            rw_api PATCH /api/internal-squads "$(jq -n --arg u "$su" --argjson i "$(jq -c --argjson m "$umap" 'map($m[.] // .) | unique' <<<"$scur")" '{uuid:$u, inbounds:$i}')" >/dev/null
+        done < <(jq -r '.response.internalSquads[]?.uuid' <<<"$squads_before")
     fi
     iuuid="${niuuid:-$iuuid}"
 
@@ -377,9 +393,9 @@ node_transport_change() {   # [tag]
         [[ -z "$hu" ]] && continue
         hf=$(host_fields "$new" "$ha")
         r=$(rw_api PATCH /api/hosts "$(jq -n --arg u "$hu" --argjson h "$hf" --arg p "$puuid" --arg i "$iuuid" \
-            '$h + {uuid:$u, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}}')")
+            '$h + {uuid:$u, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
         if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «${hr}» обновлён"; else warn "Хост «${hr}»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
-    done < <(rw_api GET /api/hosts | jq -r --arg a "$SEL_IUUID" --arg b "$iuuid" '.response[] | select(.inbound.configProfileInboundUuid == $a or .inbound.configProfileInboundUuid == $b) | [.uuid, .remark, (.port|tostring), .address] | @tsv')
+    done < <(jq -r --arg a "$SEL_IUUID" --arg b "$iuuid" '.response[]? | select(.inbound.configProfileInboundUuid == $a or .inbound.configProfileInboundUuid == $b) | [.uuid, .remark, (.port|tostring), .address] | @tsv' <<<"$hosts_before")
 
     if [[ "$here" == yes ]]; then
         info "Жду, пока Xray поднимется на $T_PORT/${nl4}…"
@@ -434,29 +450,51 @@ node_transport_add() {   # [tag-образца]
         confirm "Нода подготовлена?" n || { info "Отменено, панель не изменена"; return 1; }
     fi
 
-    # 2) профиль: + новые inbound'ы (ключи Reality — как у образца)
-    local prefix inbs cfg r
+    # 2) профиль: + новые inbound'ы (ключи Reality — как у образца).
+    #    Снимки нод, хостов и squad'ов снимаем ДО PATCH: панель при PATCH может
+    #    пересоздать все inbound'ы профиля с новыми uuid и каскадно сбросить старые привязки.
+    local prefix inbs prof_before nodes_before hosts_before squads_before cfg r
     prefix=$(tag_prefix "${rtag%%_*}")
     inbs=$(build_inbounds "$prefix" "$opriv" "$osid") || return 1
-    cfg=$(rw_api GET "/api/config-profiles/$puuid" | jq --argjson n "$inbs" '.response.config | .inbounds += $n')
+    prof_before=$(rw_api GET "/api/config-profiles/$puuid")
+    nodes_before=$(rw_api GET /api/nodes)
+    hosts_before=$(rw_api GET /api/hosts)
+    squads_before=$(rw_api GET /api/internal-squads)
+    cfg=$(jq --argjson n "$inbs" '.response.config | .inbounds += $n' <<<"$prof_before")
     r=$(rw_api PATCH /api/config-profiles "$(rw_profile_body "$puuid" <<<"$cfg")")
     jq -e '.response.uuid' >/dev/null <<<"$r" || die "Панель не приняла профиль: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"
     ok "Профиль обновлён"
+    local inbs_after; inbs_after=$(jq -c '.response.inbounds // empty' <<<"$r")
+    [[ -z "$inbs_after" || "$inbs_after" == "[]" ]] && inbs_after=$(rw_api GET "/api/config-profiles/$puuid" | jq -c '.response.inbounds // []')
     local -A uuid_of=(); local tag u
-    while IFS=$'\t' read -r tag u; do uuid_of[$tag]="$u"; done < <(jq -r '.response.inbounds[] | [.tag, .uuid] | @tsv' <<<"$r")
+    while IFS=$'\t' read -r tag u; do uuid_of[$tag]="$u"; done < <(jq -r '.[] | [.tag, .uuid] | @tsv' <<<"${inbs_after:-[]}")
+    local umap; umap=$(jq -nc --argjson old "$(jq -c '.response.inbounds // []' <<<"$prof_before")" --argjson new "${inbs_after:-[]}" '
+        ($new | map({(.tag): .uuid}) | add // {}) as $n
+        | [$old[] | select($n[.tag] != null) | {(.uuid): $n[.tag]}] | add // {}')
     local added=(); while read -r tag; do [[ -n "${uuid_of[$tag]:-}" ]] && added+=("${uuid_of[$tag]}"); done < <(jq -r '.[].tag' <<<"$inbs")
     local newj; newj=$(printf '%s\n' "${added[@]}" | jq -R . | jq -sc .)
+    local ref_new="${uuid_of[$rtag]:-$ruuid}"
 
-    # 3) ноды с этим профилем и образцом — включить новые inbound'ы
+    # 3) ноды с этим профилем и образцом — сохранить старые (с их новыми uuid) и включить новые inbound'ы
     local nu ai
     while IFS=$'\t' read -r nu ai; do
-        rw_api PATCH /api/nodes "$(jq -n --arg u "$nu" --arg p "$puuid" --argjson a "$ai" --argjson n "$newj" \
-            '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:(($a + $n) | unique)}}')" >/dev/null && ok "Нода $nu: транспорты включены"
-    done < <(rw_api GET /api/nodes | jq -r --arg o "$ruuid" '.response[] | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv')
+        rw_api PATCH /api/nodes "$(jq -n --arg u "$nu" --arg p "$puuid" --argjson a "$ai" --argjson m "$umap" --argjson n "$newj" --arg rn "$ref_new" \
+            '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:((($a | map($m[.] // .)) + [$rn] + $n) | unique)}}')" >/dev/null && ok "Нода $nu: транспорты включены"
+    done < <(jq -r --arg o "$ruuid" --arg p "$puuid" '.response[]? | select((.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) or .configProfile.activeConfigProfileUuid == $p) | [.uuid, ((.configProfile.activeInbounds // []) | map(.uuid // .) | tojson)] | @tsv' <<<"$nodes_before")
+
+    # перепривязать существующие хосты этого профиля, если панель сменила uuid старым inbound'ам
+    local ehu ehi eni
+    while IFS=$'\t' read -r ehu ehi; do
+        [[ -n "$ehu" && -n "$ehi" ]] || continue
+        eni=$(jq -r --arg k "$ehi" '.[$k] // empty' <<<"$umap")
+        if [[ -n "$eni" && "$eni" != "$ehi" ]]; then
+            rw_api PATCH /api/hosts "$(jq -nc --arg u "$ehu" --arg p "$puuid" --arg i "$eni" '{uuid:$u, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}}')" >/dev/null
+        fi
+    done < <(jq -r --arg p "$puuid" '.response[]? | select(.inbound.configProfileUuid == $p) | [.uuid, (.inbound.configProfileInboundUuid // "")] | @tsv' <<<"$hosts_before")
 
     # 4) хосты по образцу: тот же адрес, имя «<имя образца> · <транспорт>»
     local rhost raddr rrem inb hf label
-    rhost=$(rw_hosts_of "$ruuid" | head -1)
+    rhost=$(jq -r --arg i "$ruuid" --arg p "$puuid" '[.response[]? | select(.inbound.configProfileInboundUuid == $i or .inbound.configProfileUuid == $p)] | first | select(. != null) | [.uuid, .remark, (.port|tostring), .address] | @tsv' <<<"$hosts_before")
     IFS=$'\t' read -r _ rrem _ raddr <<<"$rhost"
     rrem="${rrem% · *}"; [[ -n "$rrem" ]] || rrem="$pname"
     [[ -n "$raddr" ]] || raddr="${T_DOMAIN:-$(public_ip)}"
@@ -467,8 +505,16 @@ node_transport_add() {   # [tag-образца]
         r=$(rw_api POST /api/hosts "$(jq -n --argjson h "$hf" --arg p "$puuid" --arg i "$u" --arg rem "$rrem · $label" \
             '$h + {remark:$rem, inbound:{configProfileUuid:$p, configProfileInboundUuid:$i}} | with_entries(select(.value != null))')")
         if jq -e '.response.uuid' >/dev/null <<<"$r"; then ok "Хост «$rrem · ${label}»"; else warn "Хост «$rrem · ${label}»: $(jq -c '.message // .' <<<"$r" 2>/dev/null)"; fi
-        squad_link_like "$u" "$ruuid"
     done < <(jq -c '.[]' <<<"$inbs")
+
+    # обновить squad'ы, где был образец (сохранив пересозданные uuid и добавив новые)
+    local su scur
+    while read -r su; do
+        [[ -n "$su" ]] || continue
+        scur=$(jq -c --arg u "$su" '.response.internalSquads[]? | select(.uuid == $u) | [.inbounds[]? | (.uuid // .)]' <<<"$squads_before")
+        jq -e --arg o "$ruuid" 'index($o)' <<<"$scur" >/dev/null || continue
+        rw_api PATCH /api/internal-squads "$(jq -n --arg u "$su" --argjson i "$(jq -c --argjson m "$umap" --argjson n "$newj" --arg rn "$ref_new" '(map($m[.] // .) + [$rn] + $n) | unique' <<<"$scur")" '{uuid:$u, inbounds:$i}')" >/dev/null
+    done < <(jq -r '.response.internalSquads[]?.uuid' <<<"$squads_before")
 
     if [[ "$here" == yes ]]; then
         for t in "${T_LIST[@]}"; do
@@ -658,6 +704,9 @@ node_core() {   # [both|xray|mihomo|status] [--profile ИМЯ|№ … | --all]
         u=$(jq -r .uuid <<<"$p"); n=$(jq -r .name <<<"$p")
         grep -qxF "$u" <<<"$picked" || continue
         full=$(rw_api GET "/api/config-profiles/$u")
+        local nodes_before squads_before
+        nodes_before=$(rw_api GET /api/nodes)
+        squads_before=$(rw_api GET /api/internal-squads)
         cfg=$(jq -c '.response.config // {}' <<<"$full")
         local -A old_uuid=() new_uuid=()
         local tag iu
@@ -669,7 +718,7 @@ node_core() {   # [both|xray|mihomo|status] [--profile ИМЯ|№ … | --all]
             continue
         fi
         while IFS=$'\t' read -r tag iu; do [[ -n "$tag" ]] && new_uuid[$tag]="$iu"; done < <(jq -r '.response.inbounds[]? | [.tag, .uuid] | @tsv' <<<"$r")
-        # если панель выдала новый uuid inbound'у после смены raw↔tcp — перепривязать ноды и squad'ы
+        # если панель выдала новый uuid inbound'у после смены raw↔tcp — перепривязать ноды и squad'ы по снимкам до PATCH
         for tag in "${!old_uuid[@]}"; do
             local ou="${old_uuid[$tag]}" nu="${new_uuid[$tag]:-}"
             if [[ -n "$nu" && "$nu" != "$ou" ]]; then
@@ -677,8 +726,14 @@ node_core() {   # [both|xray|mihomo|status] [--profile ИМЯ|№ … | --all]
                 while IFS=$'\t' read -r node_u ai; do
                     rw_api PATCH /api/nodes "$(jq -n --arg u "$node_u" --arg p "$u" --argjson a "$ai" --arg o "$ou" --arg n "$nu" \
                         '{uuid:$u, configProfile:{activeConfigProfileUuid:$p, activeInbounds:($a | map(if . == $o then $n else . end))}}')" >/dev/null
-                done < <(rw_api GET /api/nodes | jq -r --arg o "$ou" '.response[]? | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv')
-                squad_add_inbound "$nu" "$ou" >/dev/null 2>&1
+                done < <(jq -r --arg o "$ou" '.response[]? | select(.configProfile.activeInbounds // [] | map(.uuid // .) | index($o)) | [.uuid, (.configProfile.activeInbounds | map(.uuid // .) | tojson)] | @tsv' <<<"$nodes_before")
+                local su scur
+                while read -r su; do
+                    [[ -n "$su" ]] || continue
+                    scur=$(jq -c --arg u "$su" '.response.internalSquads[]? | select(.uuid == $u) | [.inbounds[]? | (.uuid // .)]' <<<"$squads_before")
+                    jq -e --arg o "$ou" 'index($o)' <<<"$scur" >/dev/null || continue
+                    rw_api PATCH /api/internal-squads "$(jq -n --arg u "$su" --argjson i "$(jq -c --arg o "$ou" --arg n "$nu" 'map(if . == $o then $n else . end) | unique' <<<"$scur")" '{uuid:$u, inbounds:$i}')" >/dev/null
+                done < <(jq -r '.response.internalSquads[]?.uuid' <<<"$squads_before")
             fi
         done
         # обновить хосты этого профиля (кроме обёртки балансировщика F2D_AUTO)

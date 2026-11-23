@@ -184,9 +184,72 @@ remove_panel() {   # [--reinstall]
     [[ "$drop_db" == no ]] && info "Том с базой сохранён: при новой установке с тем же паролем БД данные вернутся (пароль — в архиве .env)."
 }
 
-reinstall_panel() {
-    remove_panel --reinstall || return 1
-    install_panel
+reinstall_panel() {   # [--keep-data | --from <копия> | --clean]
+    require_root; load_config
+    local mode="" from=""
+    while (($#)); do
+        case "$1" in
+            --keep-data|--keep) mode=keep;;
+            --from|-f) mode=from; from="${2:?путь к копии}"; shift;;
+            --clean) mode=clean;;
+            *) [[ -f "$1" || -f "$F2D_BACKUP_DIR/$1" ]] && { mode=from; from="$1"; } || die "reinstall panel [--keep-data | --from <копия> | --clean]";;
+        esac; shift
+    done
+
+    local -a bks=()
+    local bf; for bf in "$F2D_BACKUP_DIR"/panel-*.tar "$F2D_BACKUP_DIR"/panel-*.tar.enc; do [[ -f "$bf" ]] && bks+=("$bf"); done
+
+    if [[ -z "$mode" ]]; then
+        title "Переустановка панели Remnawave"
+        echo "   1. ${C_BOLD}С сохранением всех данных${C_RESET} — снять полную резервную копию сейчас,"
+        echo "      переустановить контейнеры и сразу подкрепить базу, секреты и ноды"
+        echo "   2. ${C_BOLD}Подкрепить данные из готовой резервной копии${C_RESET} ($F2D_BACKUP_DIR: ${#bks[@]} шт.)"
+        echo "   3. Чистая установка (старая база сохранится в архив, панель начнёт с нуля)"
+        local def=1; ! has_panel && ((${#bks[@]} > 0)) && def=2
+        ask "Вариант" "$def"
+        case "$REPLY" in
+            1) mode=keep;;
+            2) mode=from;;
+            3) mode=clean;;
+            *) info "Отменено"; return 1;;
+        esac
+    fi
+
+    if [[ "$mode" == keep ]]; then
+        has_panel || compose_file "$RW_PANEL_DIR" >/dev/null || die "Текущая панель не найдена — выберите восстановление из готовой копии (--from)"
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${RW_DB_CONTAINER:-remnawave-db}"; then
+            info "Запускаю контейнер базы для снятия полной копии…"
+            (cd "$RW_PANEL_DIR" && docker compose up -d "${RW_DB_CONTAINER:-remnawave-db}" >/dev/null 2>&1)
+            bk_db_wait 60 || warn "База не ответила — проверьте готовые копии в $F2D_BACKUP_DIR"
+        fi
+        info "Создаю полную резервную копию текущей панели…"
+        backup_create --no-password --quiet || die "Не удалось снять резервную копию панели — данные не тронуты"
+        ok "Резервная копия снята: $BACKUP_LAST"
+        info "Переустанавливаю панель и подкрепляю все данные из копии…"
+        backup_restore "$BACKUP_LAST" --yes
+        return $?
+    elif [[ "$mode" == from ]]; then
+        if [[ -z "$from" ]]; then
+            ((${#bks[@]} > 0)) || die "В $F2D_BACKUP_DIR нет копий panel-*.tar — укажите путь: f2d reinstall panel --from /путь/к/копии.tar"
+            echo
+            echo "  ${C_BOLD}Доступные резервные копии:${C_RESET}"
+            local i
+            for i in "${!bks[@]}"; do
+                printf '  %s%2d.%s %-44s %s\n' "$C_YELLOW" $((i + 1)) "$C_RESET" "$(basename "${bks[i]}")" "$(date -r "${bks[i]}" '+%F %T' 2>/dev/null || true)"
+            done
+            ask "Номер копии (или полный путь к файлу)" "${#bks[@]}"
+            if [[ "$REPLY" =~ ^[0-9]+$ ]] && ((REPLY >= 1 && REPLY <= ${#bks[@]})); then
+                from="${bks[REPLY - 1]}"
+            else
+                from="$REPLY"
+            fi
+        fi
+        backup_restore "$from" --yes
+        return $?
+    else
+        remove_panel --reinstall || return 1
+        install_panel
+    fi
 }
 
 remove_cli() {   # node|panel
@@ -197,7 +260,7 @@ remove_cli() {   # node|panel
 }
 reinstall_cli() {
     case "${1:-}" in
-        node) shift; reinstall_node "$@";; panel) reinstall_panel;;
+        node) shift; reinstall_node "$@";; panel) shift; reinstall_panel "$@";;
         *) die "reinstall node|panel";;
     esac
 }

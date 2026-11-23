@@ -28,6 +28,12 @@ web_set() {   # KEY VALUE
 
 web_installed() { [[ -f "$F2D_WEB_DIR/docker-compose.yml" ]]; }
 
+# Сторонний веб-сервер установщика (remnawave-nginx, caddy-remnawave и т.п.),
+# который сам владеет /dev/shm/nginx.sock и отдаёт панель/selfsteal.
+external_web_proxy() {
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(remnawave-nginx|caddy-remnawave|remnawave-caddy|caddy)$' | head -1
+}
+
 panel_login_url() {
     web_load
     [[ -n "$PANEL_DOMAIN" ]] || return 1
@@ -128,7 +134,7 @@ $(_web_ssl "$SUB_DOMAIN")
 
 EOF
     fi
-    if [[ -n "$SELFSTEAL_DOMAIN" ]]; then
+    if [[ -n "$SELFSTEAL_DOMAIN" && "$SELFSTEAL_DOMAIN" != "${PANEL_DOMAIN:-}" && "$SELFSTEAL_DOMAIN" != "${SUB_DOMAIN:-}" ]]; then
         cat <<EOF
 # selfsteal: обычный сайт, который видит сканер, пришедший на порт Reality
 server {
@@ -188,8 +194,9 @@ web_site_generate() { site_generate "$F2D_WEB_ROOT"; }
 
 web_apply() {
     require_docker
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
-        err "На сервере уже работает другой nginx (remnawave-nginx) — он владеет $NGINX_SOCK."
+    local ext; ext=$(external_web_proxy)
+    if [[ -n "$ext" ]]; then
+        err "На сервере уже есть прокси установщика ($ext) — он владеет $NGINX_SOCK."
         err "Второй nginx не ставлю: сайты и панель здесь настраивает тот установщик."
         return 1
     fi
@@ -241,10 +248,11 @@ EOF
 
 # починить/настроить маскировку на уже работающей ноде, без переустановки
 web_selfsteal_setup() {   # домен
-    local dom="$1"
+    local dom="$1" ext
     [[ -n "$dom" ]] || die "fail2detect web selfsteal <домен ноды>"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
-        die "Сайт здесь отдаёт nginx установщика (remnawave-nginx) — настраивайте его там"
+    ext=$(external_web_proxy)
+    if [[ -n "$ext" ]]; then
+        die "Сайт здесь отдаёт прокси установщика ($ext) — настраивайте его там"
     fi
     web_load
     cert_ensure "$dom" || die "Не удалось получить сертификат для $dom"

@@ -298,8 +298,9 @@ node_prepare() {
     # установка) — тогда Reality отдаёт сканеру обрыв рукопожатия вместо сайта.
     # Поэтому домен прописываем всегда, а не только когда сокета нет.
     if transport_reality "$t" && [[ -z "$target" || "$target" == "$NGINX_SOCK" ]]; then
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx remnawave-nginx; then
-            ok "Selfsteal-сайт отдаёт nginx установщика (remnawave-nginx)"
+        local ext; ext=$(external_web_proxy)
+        if [[ -n "$ext" ]]; then
+            ok "Selfsteal-сайт отдаёт прокси установщика ($ext)"
         else
             [[ -n "$domain" ]] || die "Для Reality-selfsteal нужен домен (или укажите чужой target)"
             cert_ensure "$domain" || die "Не удалось получить сертификат для $domain"
