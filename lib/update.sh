@@ -23,14 +23,15 @@ version_gt() {
     return 1
 }
 
-# последняя версия в репозитории (сначала GitLab, запасной — GitHub)
+# последняя версия в репозитории (сначала GitLab, запасной — GitHub; берётся более свежая)
 f2d_remote_version() {
-    local v
-    v=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_URL}/lib/common.sh" 2>/dev/null \
+    local v1 v2
+    v1=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_URL}/lib/common.sh" 2>/dev/null \
         | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1)
-    [[ -n "$v" ]] || v=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_FALLBACK}/lib/common.sh" 2>/dev/null \
+    v2=$(curl -fsS --connect-timeout 3 --max-time 6 "${F2D_RAW_FALLBACK}/lib/common.sh" 2>/dev/null \
         | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1)
-    echo "$v"
+    if [[ -n "$v1" && -n "$v2" ]] && version_gt "$v2" "$v1"; then echo "$v2"
+    else echo "${v1:-$v2}"; fi
 }
 
 # версия, до которой можно обновиться (пусто — обновлений нет). С кэшем.

@@ -32,9 +32,13 @@ if [[ -n "$SRC_DIR" && -f "$SRC_DIR/fail2detect" && -d "$SRC_DIR/lib" ]]; then
     cp -a "$SRC_DIR/." "$tmp/src"   # установка из локальной копии репозитория
 else
     mkdir -p "$tmp/src"
+    v_gh=$(curl -fsS --connect-timeout 3 --max-time 6 "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/common.sh" 2>/dev/null \
+        | sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' | head -1 || true)
     if ! { curl -fsS --connect-timeout 5 --max-time 30 "https://gitlab.com/${GITLAB_REPO}/-/archive/${BRANCH}/fail2detect-${BRANCH}.tar.gz" -o "$tmp/f2d.tgz" 2>/dev/null \
            && tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1 2>/dev/null \
-           && [[ -f "$tmp/src/fail2detect" ]]; }; then
+           && [[ -f "$tmp/src/fail2detect" ]] \
+           && { [[ -z "$v_gh" ]] || { v_gl=$(sed -nE 's/^F2D_VERSION="([^"]+)".*/\1/p' "$tmp/src/lib/common.sh" 2>/dev/null | head -1) \
+                && [[ "$(printf '%s\n%s\n' "$v_gh" "$v_gl" | sort -V | tail -1)" == "$v_gl" ]]; }; }; }; then
         rm -rf "$tmp/src"; mkdir -p "$tmp/src"
         curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" -o "$tmp/f2d.tgz"
         tar -xzf "$tmp/f2d.tgz" -C "$tmp/src" --strip-components=1
