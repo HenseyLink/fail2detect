@@ -286,10 +286,22 @@ node_prepare() {
         (( rc == 2 )) && die "Добавьте в $d/docker-compose.yml в volumes сервиса remnanode: - ./certs:$XRAY_CERT_DIR:ro"
         if (( rc == 0 )) || ! node_certs_visible; then
             info "Пересоздаю контейнер ноды, чтобы подключить ${XRAY_CERT_DIR}…"
-            (cd "$d" && docker compose up -d --force-recreate remnanode >/dev/null 2>&1) || die "docker compose не пересоздал remnanode"
+            local cf_bak; cf_bak="$(compose_file "$d").f2d.bak"
+            docker rm -f remnanode $(docker ps -aq --filter "name=remnanode" 2>/dev/null) >/dev/null 2>&1 || true
+            if ! (cd "$d" && docker compose up -d remnanode); then
+                [[ -f "$cf_bak" ]] && cp -a "$cf_bak" "$(compose_file "$d")"
+                (cd "$d" && docker compose up -d remnanode >/dev/null 2>&1) || true
+                die "docker compose не смог пересоздать remnanode (прежний compose восстановлен)"
+            fi
             local i; for i in $(seq 1 15); do node_certs_visible && break; sleep 1; done
         fi
-        node_certs_visible || die "Контейнер remnanode не видит $XRAY_CERT_DIR/fullchain.pem — панель НЕ изменена. Проверьте volumes в $d/docker-compose.yml"
+        if ! node_certs_visible; then
+            local cf_bak; cf_bak="$(compose_file "$d").f2d.bak"
+            [[ -f "$cf_bak" ]] && cp -a "$cf_bak" "$(compose_file "$d")"
+            docker rm -f remnanode $(docker ps -aq --filter "name=remnanode" 2>/dev/null) >/dev/null 2>&1 || true
+            (cd "$d" && docker compose up -d remnanode >/dev/null 2>&1) || true
+            die "Контейнер remnanode не видит $XRAY_CERT_DIR/fullchain.pem — панель НЕ изменена, прежний compose восстановлен"
+        fi
         ok "Нода видит сертификат $domain ($XRAY_CERT_DIR)"
     fi
 

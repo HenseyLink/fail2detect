@@ -99,7 +99,25 @@ panel_fix_local_node() {
         else
             ok "Адрес верный: $addr — шлюз docker-сети панели${net:+ ($net)}"
         fi
-        # 3) нода слушает свой API
+        # 3) нода слушает свой API (если контейнер остановлен или завис в created — запускаем)
+        if ! ss -H -tln "( sport = :$port )" 2>/dev/null | grep -q .; then
+            local nd; nd=$(node_dir)
+            if [[ -n "$nd" ]]; then
+                info "Контейнер ноды не запущен — очищаю зависшие копии и запускаю remnanode в $nd…"
+                local dead; dead=$(docker ps -aq --filter "name=remnanode" 2>/dev/null | tr '\n' ' ')
+                # shellcheck disable=SC2086
+                [[ -n "$dead" ]] && docker rm -f $dead >/dev/null 2>&1 || true
+                if ! (cd "$nd" && docker compose up -d remnanode 2>&1 | sed 's/^/    /'); then
+                    local cf; cf=$(compose_file "$nd")
+                    if [[ -f "$cf.f2d.bak" ]]; then
+                        warn "Восстанавливаю $cf из резервной копии $cf.f2d.bak и запускаю remnanode…"
+                        cp -a "$cf.f2d.bak" "$cf"
+                        (cd "$nd" && docker compose up -d remnanode 2>&1 | sed 's/^/    /') || true
+                    fi
+                fi
+                local w; for w in $(seq 1 10); do ss -H -tln "( sport = :$port )" 2>/dev/null | grep -q . && break; sleep 1; done
+            fi
+        fi
         if ss -H -tln "( sport = :$port )" 2>/dev/null | grep -q .; then
             ok "Нода слушает API на порту $port"
         else
